@@ -45,6 +45,10 @@ def db() -> sqlite3.Connection:
         "user_id INTEGER, chat_id INTEGER, ts INTEGER, lat REAL, lon REAL, addr TEXT)"
     )
     con.execute("CREATE INDEX IF NOT EXISTS ix_points ON points(user_id, ts)")
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS live ("
+        "user_id INTEGER PRIMARY KEY, chat_id INTEGER, lat REAL, lon REAL, seen INTEGER, expires INTEGER)"
+    )
     return con
 
 
@@ -52,6 +56,30 @@ def last_ts(user_id: int) -> int:
     with db() as con:
         row = con.execute("SELECT MAX(ts) FROM points WHERE user_id=?", (user_id,)).fetchone()
     return row[0] or 0
+
+
+def last_point(user_id: int):
+    with db() as con:
+        return con.execute(
+            "SELECT ts, lat, lon, addr FROM points WHERE user_id=? ORDER BY ts DESC LIMIT 1", (user_id,)
+        ).fetchone()
+
+
+def set_live(user_id, chat_id, lat, lon, seen, expires):
+    with db() as con:
+        con.execute("INSERT OR REPLACE INTO live VALUES (?,?,?,?,?,?)", (user_id, chat_id, lat, lon, seen, expires))
+
+
+def stop_live(user_id):
+    with db() as con:
+        con.execute("DELETE FROM live WHERE user_id=?", (user_id,))
+
+
+def active_live(now):
+    with db() as con:
+        return con.execute(
+            "SELECT user_id, chat_id, lat, lon, seen FROM live WHERE expires>?", (now,)
+        ).fetchall()
 
 
 def save_point(user_id, chat_id, ts, lat, lon, addr):
@@ -240,17 +268,46 @@ def allowed(update: Update) -> bool:
     return not ALLOWED_USER_ID or (update.effective_user and update.effective_user.id == ALLOWED_USER_ID)
 
 
+async def record(bot, user_id, chat_id, lat, lon, now, stale_min=0):
+    """Nuqtani saqlaydi va botga xabar yozadi."""
+    prev = last_point(user_id)
+    if prev and (prev[1], prev[2]) == (lat, lon):
+        addr = prev[3]  # joy o'zgarmagan - qayta so'ramaymiz
+    else:
+        addr = await asyncio.to_thread(reverse_geocode, lat, lon)
+    save_point(user_id, chat_id, now, lat, lon, addr)
+    note = f"\n⚠️ signal {stale_min} daq oldin uzilgan, oxirgi ma'lum joy" if stale_min else ""
+    await bot.send_message(chat_id, f"📍 {datetime.fromtimestamp(now, TZ):%H:%M} — {addr}{note}")
+
+
 async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message  # jonli lokatsiya yangilanishlari edited_message bo'lib keladi
     if not msg or not msg.location or not allowed(update):
         return
     user_id, chat_id, now = update.effective_user.id, msg.chat_id, int(time.time())
-    if now - last_ts(user_id) < INTERVAL_MIN * 60 - 5:
-        return  # Telegram tez-tez yangilaydi, biz faqat har INTERVAL_MIN daqiqada yozamiz
     lat, lon = msg.location.latitude, msg.location.longitude
-    addr = await asyncio.to_thread(reverse_geocode, lat, lon)
-    save_point(user_id, chat_id, now, lat, lon, addr)
-    await context.bot.send_message(chat_id, f"📍 {datetime.fromtimestamp(now, TZ):%H:%M} — {addr}")
+    live = msg.location.live_period  # None bo'lsa - oddiy (bir martalik) lokatsiya
+    set_live(user_id, chat_id, lat, lon, now, int(msg.date.timestamp()) + live if live else 0)
+    if now - last_ts(user_id) >= INTERVAL_MIN * 60 - 5:
+        await record(context.bot, user_id, chat_id, lat, lon, now)
+
+
+async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
+    """Telegram joy o'zgarmasa yangilanish yubormaydi - shunda ham har INTERVAL_MIN da yozib boramiz."""
+    now = int(time.time())
+    for user_id, chat_id, lat, lon, seen in active_live(now):
+        if now - last_ts(user_id) >= INTERVAL_MIN * 60 - 5:
+            stale = (now - seen) // 60
+            try:
+                await record(context.bot, user_id, chat_id, lat, lon, now, stale if stale >= 15 else 0)
+            except Exception:
+                log.exception("heartbeat xato: %s", user_id)
+
+
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if allowed(update):
+        stop_live(update.effective_user.id)
+        await update.message.reply_text("Kuzatuv to'xtatildi. Qayta boshlash uchun jonli lokatsiyani yangidan ulashing.")
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -261,7 +318,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1) 📎 → Lokatsiya → «Jonli lokatsiyani ulashish» (8 soat/doimiy) ni tanlang.\n"
         f"2) Men har {INTERVAL_MIN} daqiqada manzilingizni yozib boraman.\n"
         f"3) Kun oxirida ({SUMMARY_TIME}) xaritada yo'lingizni yuboraman.\n\n"
-        "/app — xarita ilovasi (PWA) havolasi\n/today — bugungi xarita\n/yesterday — kechagi xarita"
+        "/stop — kuzatuvni to'xtatish\n/app — xarita ilovasi (PWA) havolasi\n/today — bugungi xarita\n/yesterday — kechagi xarita"
     )
 
 
@@ -300,10 +357,12 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     app = Application.builder().token(BOT_TOKEN).post_init(start_web).post_shutdown(stop_web).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("yesterday", cmd_yesterday))
     app.add_handler(MessageHandler(filters.LOCATION, on_location))
+    app.job_queue.run_repeating(heartbeat, interval=60, first=30)
     h, m = map(int, SUMMARY_TIME.split(":"))
     app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ))
     app.run_polling(allowed_updates=Update.ALL_TYPES)

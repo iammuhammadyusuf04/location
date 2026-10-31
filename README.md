@@ -10,7 +10,7 @@ Telegram bot: jonli lokatsiya bo'yicha har 10 daqiqada manzilingizni yozadi va k
 
 ## Foydalanish
 - Botga `/start` yozing, so'ng 📎 → Lokatsiya → **Jonli lokatsiyani ulashish**.
-- Bot har `INTERVAL_MIN` daqiqada `📍 14:30 — manzil` deb yozadi.
+- Bot har `INTERVAL_MIN` daqiqada `📍 14:30 — manzil` deb yozadi. Joyingiz o'zgarmasa ham (Telegram bunda yangilanish yubormaydi) oxirgi ma'lum joyni o'zi yozib boradi; signal 15 daqiqadan ortiq uzilsa, xabarda ogohlantiradi. `/stop` kuzatuvni to'xtatadi.
 - Kun oxirida (`SUMMARY_TIME`) vaqtlar va turgan davomiyligi bilan manzillar ro'yxati hamda PWA xaritasiga havola keladi.
 - `/today`, `/yesterday` — istalgan vaqtda xaritani so'rash.
 
