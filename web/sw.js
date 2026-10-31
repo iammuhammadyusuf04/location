@@ -1,4 +1,4 @@
-const CACHE = "locdiary-v1";
+const CACHE = "locdiary-v2";
 const SHELL = ["/", "/app.js", "/manifest.webmanifest", "/icons/icon-192.png",
   "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css", "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"];
 

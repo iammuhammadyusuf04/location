@@ -14,6 +14,7 @@ import sqlite3
 import time
 from datetime import datetime, timedelta
 from datetime import time as dtime
+from math import asin, cos, radians, sin, sqrt
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -97,21 +98,32 @@ def reverse_geocode(lat: float, lon: float) -> str:
 
 
 # ---------- Xarita ----------
-def render_png(points) -> bytes:
-    from staticmap import CircleMarker, Line, StaticMap
+STOP_RADIUS_M = int(os.getenv("STOP_RADIUS_M", "100"))
 
-    m = StaticMap(1200, 800, url_template="https://tile.openstreetmap.org/{z}/{x}/{y}.png")
-    coords = [(p[2], p[1]) for p in points]  # (lon, lat)
-    if len(coords) > 1:
-        m.add_line(Line(coords, "#1e66f5", 4))
-    for i, c in enumerate(coords):
-        color = "#16a34a" if i == 0 else "#dc2626" if i == len(coords) - 1 else "#1e66f5"
-        m.add_marker(CircleMarker(c, "white", 16))
-        m.add_marker(CircleMarker(c, color, 11))
-    img = m.render(zoom=16) if len(coords) == 1 else m.render()
-    buf = io.BytesIO()
-    img.save(buf, "PNG")
-    return buf.getvalue()
+
+def haversine_m(lat1, lon1, lat2, lon2) -> float:
+    p1, p2 = radians(lat1), radians(lat2)
+    a = sin((p2 - p1) / 2) ** 2 + cos(p1) * cos(p2) * sin(radians(lon2 - lon1) / 2) ** 2
+    return 2 * 6371000 * asin(sqrt(a))
+
+
+def fmt_dur(mins: int) -> str:
+    h, m = divmod(mins, 60)
+    return f"{h} soat {m} daq" if h and m else f"{h} soat" if h else f"{m} daq"
+
+
+def build_stops(points) -> list[dict]:
+    """Ketma-ket yaqin (STOP_RADIUS_M ichidagi) nuqtalarni bitta joyga birlashtiradi."""
+    stops: list[dict] = []
+    for ts, lat, lon, addr in points:
+        cur = stops[-1] if stops else None
+        if cur and haversine_m(cur["lat"], cur["lon"], lat, lon) <= STOP_RADIUS_M:
+            cur["to"], cur["n"] = ts, cur["n"] + 1
+        else:
+            stops.append({"lat": lat, "lon": lon, "addr": addr, "from": ts, "to": ts, "n": 1})
+    for st in stops:
+        st["mins"] = (st["to"] - st["from"]) // 60
+    return stops
 
 
 def render_html(points) -> bytes:
@@ -131,11 +143,12 @@ def render_html(points) -> bytes:
 
 
 def summary_text(points, day) -> str:
-    lines, prev = [f"🗺 {day:%d.%m.%Y} — bugungi yo'lingiz ({len(points)} ta nuqta):"], None
-    for ts, _, _, addr in points:
-        if addr != prev:  # ketma-ket bir xil manzillarni birlashtiramiz
-            lines.append(f"{datetime.fromtimestamp(ts, TZ):%H:%M} — {addr}")
-            prev = addr
+    stops = build_stops(points)
+    lines = [f"🗺 {day:%d.%m.%Y} — bugungi yo'lingiz ({len(stops)} ta joy):"]
+    for st in stops:
+        t0, t1 = (datetime.fromtimestamp(st[k], TZ).strftime("%H:%M") for k in ("from", "to"))
+        when = f"{t0}–{t1} ({fmt_dur(st['mins'])})" if st["mins"] else t0
+        lines.append(f"{when} — {st['addr']}")
     return "\n".join(lines)
 
 
@@ -144,16 +157,14 @@ async def send_summary(bot, chat_id: int, user_id: int, day):
     if not points:
         await bot.send_message(chat_id, f"{day:%d.%m.%Y} kuni uchun saqlangan lokatsiya yo'q.")
         return
-    png = await asyncio.to_thread(render_png, points)
-    html = await asyncio.to_thread(render_html, points)
     text = summary_text(points, day)
-    await bot.send_photo(chat_id, io.BytesIO(png), caption=text[:1000])
-    for i in range(1000, len(text), 4000):
+    for i in range(0, len(text), 4000):
         await bot.send_message(chat_id, text[i : i + 4000])
-    await bot.send_document(
-        chat_id, io.BytesIO(html), filename=f"xarita_{day:%Y-%m-%d}.html",
-        caption="Interaktiv xarita (brauzerda oching)",
-    )
+    if WEB_KEY and PUBLIC_URL:
+        await bot.send_message(chat_id, f"🔎 Xaritada ko'rish (yaqinlashtirish mumkin): {PUBLIC_URL}/#key={WEB_KEY}&date={day:%Y-%m-%d}")
+    else:
+        html = await asyncio.to_thread(render_html, points)
+        await bot.send_document(chat_id, io.BytesIO(html), filename=f"xarita_{day:%Y-%m-%d}.html")
 
 
 # ---------- PWA (veb-ilova) ----------
@@ -173,10 +184,14 @@ async def api_points(request: web.Request) -> web.Response:
     except ValueError:
         day = datetime.now(TZ).date()
     rows = get_points(web_user_id(), day)
-    return web.json_response([
-        {"t": datetime.fromtimestamp(ts, TZ).strftime("%H:%M"), "ts": ts, "lat": lat, "lon": lon, "addr": addr}
-        for ts, lat, lon, addr in rows
-    ])
+    hm = lambda ts: datetime.fromtimestamp(ts, TZ).strftime("%H:%M")
+    return web.json_response({
+        "points": [{"t": hm(ts), "lat": lat, "lon": lon, "addr": addr} for ts, lat, lon, addr in rows],
+        "stops": [
+            {**st, "t0": hm(st["from"]), "t1": hm(st["to"]), "dur": fmt_dur(st["mins"]) if st["mins"] else ""}
+            for st in build_stops(rows)
+        ],
+    })
 
 
 async def index(request: web.Request) -> web.FileResponse:

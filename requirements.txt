@@ -1,5 +1,4 @@
 python-telegram-bot[job-queue]>=21.0
 requests>=2.31
-staticmap>=0.5.7
 folium>=0.17
 aiohttp>=3.9
