@@ -24,6 +24,7 @@ DOMAIN="${1:-}"
 
 # 80/443 portlarni boshqa dastur (masalan, sizning saytingiz: nginx/apache) ishlatayotgan bo'lsa,
 # Caddy O'RNATILMAYDI va sayt ishiga tegilmaydi: bot faqat 127.0.0.1:8080 da turadi.
+command -v ss >/dev/null || { apt-get update -y >/dev/null && apt-get install -y iproute2 >/dev/null; }
 BUSY="$(ss -ltn 2>/dev/null | awk '{print $4}' | grep -E ':(80|443)$' || true)"
 if [ -n "${NO_CADDY:-}" ] || { [ -n "$BUSY" ] && ! systemctl is-active --quiet caddy 2>/dev/null; }; then
   USE_CADDY=0
