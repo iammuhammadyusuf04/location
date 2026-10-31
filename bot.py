@@ -54,6 +54,7 @@ PAUSE_AFTER_H = int(os.getenv("PAUSE_AFTER_H", "6"))  # shuncha soat signal bo'l
 DB_PATH = os.getenv("DB_PATH", "locations.db")
 WEB_KEY = os.getenv("WEB_KEY", "")  # PWA ga kirish kaliti; bo'sh bo'lsa veb o'chiq
 WEB_PORT = int(os.getenv("PORT", "8080"))
+WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")  # reverse proxy (Caddy) orqasida 127.0.0.1
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 WEB_DIR = Path(__file__).parent / "web"
 # GitHub Pages manzili (masalan https://user.github.io/location). Berilsa PWA shu yerdan ochiladi,
@@ -470,9 +471,9 @@ async def start_web(app: Application):
     wa.router.add_static("/", WEB_DIR)
     runner = web.AppRunner(wa)
     await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", WEB_PORT).start()
+    await web.TCPSite(runner, WEB_HOST, WEB_PORT).start()
     app.bot_data["web_runner"] = runner
-    log.info("PWA: http://0.0.0.0:%s", WEB_PORT)
+    log.info("PWA: http://%s:%s", WEB_HOST, WEB_PORT)
 
 
 async def stop_web(app: Application):

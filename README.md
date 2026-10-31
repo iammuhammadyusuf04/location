@@ -74,3 +74,14 @@ PWA fayllari (`web/`) GitHub Pages'da turadi va `main` ga har push qilinganda av
 1. Repo → **Settings → Pages → Source: GitHub Actions** ni tanlang (bir marta).
 2. Bot serveri HTTPS manzilda turishi kerak (`PUBLIC_URL`, masalan Cloudflare Tunnel). `.env` ga `PUBLIC_URL` va `PWA_URL=https://<login>.github.io/location` ni yozing.
 3. Botga `/app` yozing: havola Pages manziliga boradi va ichida kalit hamda server manzili bor (`#key=...&api=...`). Telefonda oching va «Bosh ekranga qo'shish» ni bosing. Havola `#` dan keyingi qismi serverga yuborilmaydi va ochilgach manzil satridan o'chadi.
+
+## AWS / VPS ga o'rnatish (Ubuntu/Debian)
+Server xavfsizlik guruhida (Security Group) **22, 80, 443** portlari ochiq bo'lsin (8080 ni ochmang).
+
+```bash
+sudo git clone https://github.com/iammuhammadyusuf04/location /opt/locbot
+cd /opt/locbot
+sudo BOT_TOKEN='...' ALLOWED_USER_ID='111,222' WEB_KEY='...' \
+     PWA_URL='https://xxx.netlify.app' bash deploy/setup.sh [domen]
+```
+Skript Python muhitini, `systemd` xizmatini (`locbot`, avtomatik qayta ishga tushadi) va Caddy ni (avtomatik HTTPS) o'rnatadi. Domen berilmasa, IP dan bepul `1-2-3-4.sslip.io` manzili yasaladi. Loglar: `journalctl -u locbot -f`. Yangilash: `cd /opt/locbot && sudo -u locbot git pull && sudo systemctl restart locbot`.
