@@ -41,6 +41,9 @@ WEB_KEY = os.getenv("WEB_KEY", "")  # PWA ga kirish kaliti; bo'sh bo'lsa veb o'c
 WEB_PORT = int(os.getenv("PORT", "8080"))
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 WEB_DIR = Path(__file__).parent / "web"
+# GitHub Pages manzili (masalan https://user.github.io/location). Berilsa PWA shu yerdan ochiladi,
+# ma'lumot esa PUBLIC_URL dagi bot serveridan olinadi (CORS shu manzilga ruxsat beradi).
+PWA_URL = os.getenv("PWA_URL", "").rstrip("/")
 
 log = logging.getLogger("locbot")
 
@@ -358,13 +361,41 @@ async def send_summary(bot, chat_id: int, user_id: int, day):
     for i in range(0, len(text), 4000):
         await bot.send_message(chat_id, text[i : i + 4000])
     if WEB_KEY and PUBLIC_URL:
-        await bot.send_message(chat_id, f"🔎 Xaritada ko'rish (yaqinlashtirish mumkin): {PUBLIC_URL}/#key={WEB_KEY}&date={day:%Y-%m-%d}")
+        await bot.send_message(chat_id, f"🔎 Xaritada ko'rish (yaqinlashtirish mumkin): {app_link(day)}")
     else:
         html = await asyncio.to_thread(render_html, groups)
         await bot.send_document(chat_id, io.BytesIO(html), filename=f"xarita_{day:%Y-%m-%d}.html")
 
 
 # ---------- PWA (veb-ilova) ----------
+def app_link(day=None) -> str:
+    """PWA ochiladigan havola (kalit va kerak bo'lsa API manzili bilan)."""
+    parts = [f"key={WEB_KEY}"]
+    if PWA_URL:
+        parts.append(f"api={PUBLIC_URL}")
+    if day:
+        parts.append(f"date={day:%Y-%m-%d}")
+    return f"{PWA_URL or PUBLIC_URL}/#" + "&".join(parts)
+
+
+@web.middleware
+async def cors(request: web.Request, handler):
+    origin = request.headers.get("Origin", "")
+    allowed_origin = bool(PWA_URL) and origin == "/".join(PWA_URL.split("/")[:3])  # faqat Pages domeni
+    if request.method == "OPTIONS":
+        resp = web.Response(status=204)
+    else:
+        try:
+            resp = await handler(request)
+        except web.HTTPException as e:
+            resp = e
+    if allowed_origin:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Access-Control-Allow-Headers"] = "X-Key"
+        resp.headers["Vary"] = "Origin"
+    return resp
+
+
 def check_key(request: web.Request):
     if not hmac.compare_digest(request.headers.get("X-Key", ""), WEB_KEY):
         raise web.HTTPUnauthorized()
@@ -416,7 +447,7 @@ async def start_web(app: Application):
     if not WEB_KEY:
         log.warning("WEB_KEY berilmagan — PWA o'chirilgan")
         return
-    wa = web.Application()
+    wa = web.Application(middlewares=[cors])
     wa.router.add_get("/", index)
     wa.router.add_get("/api/points", api_points)
     wa.router.add_get("/api/days", api_days)
@@ -626,7 +657,7 @@ async def cmd_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("PWA sozlanmagan: .env da WEB_KEY va PUBLIC_URL ni to'ldiring.")
         return
     await update.message.reply_text(
-        f"{PUBLIC_URL}/#key={WEB_KEY}\n\nBu havolani ochib, «Bosh ekranga qo'shish» (Install) ni bosing."
+        f"{app_link()}\n\nBu havolani ochib, «Bosh ekranga qo'shish» (Install) ni bosing."
     )
 
 

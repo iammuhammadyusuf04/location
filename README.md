@@ -41,3 +41,10 @@ Xaritada bir joyda (`STOP_RADIUS_M`, standart 100 m ichida) turgan nuqtalar bitt
 ## Egasi va «signal uzildi» ogohlantirishi
 - `OWNER_ID` (yoki `ALLOWED_USER_ID` dagi birinchi ID) — **egasi**. Barcha 10 daqiqalik xabarlar, ogohlantirishlar va kunlik hisobotlar egasiga keladi (egasi botga bir marta `/start` bosgan bo'lishi kerak). Farzand o'z telefonidan faqat jonli lokatsiyani ulaydi; unga «Joylashuvingiz ulandi» deb yoziladi, xolos. Egasi `/list`, `/rename`, `/color`, `/stop` bilan hamma joylashuvni boshqaradi.
 - Biror joylashuvdan `ALERT_AFTER_MIN` (standart 60) daqiqa signal kelmasa, egasiga bir marta «⚠️ Ali dan signal uzildi — oxirgi joy: ...» yoziladi. Signal qaytsa «✅ Ali signali qayta tiklandi» keladi. Jonli lokatsiya muddati tugagan bo'lsa ham shunday ogohlantiradi.
+
+## PWA ni GitHub Pages'dan berish
+PWA fayllari (`web/`) GitHub Pages'da turadi va `main` ga har push qilinganda avtomatik yangilanadi (`.github/workflows/pages.yml`). Ma'lumotlar bot serveridan olinadi.
+
+1. Repo → **Settings → Pages → Source: GitHub Actions** ni tanlang (bir marta).
+2. Bot serveri HTTPS manzilda turishi kerak (`PUBLIC_URL`, masalan Cloudflare Tunnel). `.env` ga `PUBLIC_URL` va `PWA_URL=https://<login>.github.io/location` ni yozing.
+3. Botga `/app` yozing: havola Pages manziliga boradi va ichida kalit hamda server manzili bor (`#key=...&api=...`). Telefonda oching va «Bosh ekranga qo'shish» ni bosing. Havola `#` dan keyingi qismi serverga yuborilmaydi va ochilgach manzil satridan o'chadi.

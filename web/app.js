@@ -4,10 +4,14 @@ const iso = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())
 const MONTHS = ["Yanvar", "Fevral", "Mart", "Aprel", "May", "Iyun", "Iyul", "Avgust", "Sentabr", "Oktyabr", "Noyabr", "Dekabr"];
 
 // /app buyrug'i bergan havola: https://.../#key=XXXX&date=YYYY-MM-DD
+// GitHub Pages'da ishlaganda bot serveri manzili ham beriladi: ...#key=XXXX&api=https://bot.example.com
 const km = location.hash.match(/key=([^&]+)/);
+const am = location.hash.match(/api=([^&]+)/);
 const dm = location.hash.match(/date=(\d{4}-\d{2}-\d{2})/);
 if (km) localStorage.locKey = decodeURIComponent(km[1]);
-if (km || dm) history.replaceState(null, "", "/");
+if (am) localStorage.locApi = decodeURIComponent(am[1]).replace(/\/+$/, "");
+if (km || am || dm) history.replaceState(null, "", location.pathname);
+const API = localStorage.locApi || ""; // bo'sh bo'lsa - bot shu serverning o'zida
 
 // ---------- Telefon xotirasi (IndexedDB): har bir kun alohida saqlanadi ----------
 const idb = new Promise((res, rej) => {
@@ -30,7 +34,7 @@ const allDays = () => tx("readonly", s => s.getAll());
 if (navigator.storage?.persist) navigator.storage.persist(); // brauzer o'zi o'chirib yubormasin
 
 async function api(path) {
-  const r = await fetch(path, { headers: { "X-Key": localStorage.locKey || "" } });
+  const r = await fetch(API + path, { headers: { "X-Key": localStorage.locKey || "" } });
   if (r.status === 401) {
     const k = prompt("Kirish kaliti (WEB_KEY):");
     if (!k) throw new Error("401");
@@ -203,4 +207,4 @@ async function sync() {
 
 setInterval(() => { if (!document.hidden && date === iso(new Date())) load(false); }, 60000);
 refreshMeta().then(() => load()).then(sync);
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
