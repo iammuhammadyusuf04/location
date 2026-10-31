@@ -21,6 +21,22 @@ fi
 WEB_KEY="${WEB_KEY:-$(openssl rand -hex 24)}"
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOMAIN="${1:-}"
+
+# 80/443 portlarni boshqa dastur (masalan, sizning saytingiz: nginx/apache) ishlatayotgan bo'lsa,
+# Caddy O'RNATILMAYDI va sayt ishiga tegilmaydi: bot faqat 127.0.0.1:8080 da turadi.
+BUSY="$(ss -ltn 2>/dev/null | awk '{print $4}' | grep -E ':(80|443)$' || true)"
+if [ -n "${NO_CADDY:-}" ] || { [ -n "$BUSY" ] && ! systemctl is-active --quiet caddy 2>/dev/null; }; then
+  USE_CADDY=0
+  if [ -z "$DOMAIN" ]; then
+    echo "Serverda 80/443 portlarni boshqa dastur (saytingiz) ishlatyapti: Caddy o'rnatilmaydi, saytga tegilmaydi."
+    echo "Bot uchun alohida (sub)domen bering va uni shu serverga yo'naltiring, masalan:"
+    echo "  sudo BOT_TOKEN=... ALLOWED_USER_ID=... bash deploy/setup.sh bot.sizningsayt.uz"
+    exit 1
+  fi
+else
+  USE_CADDY=1
+fi
+
 if [ -z "$DOMAIN" ]; then
   IP="$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')"
   DOMAIN="${IP//./-}.sslip.io"
@@ -30,7 +46,7 @@ echo "==> Paketlar o'rnatilmoqda"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y python3 python3-venv python3-pip curl gpg debian-keyring debian-archive-keyring apt-transport-https
-if ! command -v caddy >/dev/null; then
+if [ "$USE_CADDY" = 1 ] && ! command -v caddy >/dev/null; then
   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list
   apt-get update -y && apt-get install -y caddy
@@ -81,14 +97,16 @@ systemctl daemon-reload
 systemctl enable --now locbot
 systemctl restart locbot
 
-echo "==> Caddy (HTTPS)"
-cat > /etc/caddy/Caddyfile <<CADDY
+if [ "$USE_CADDY" = 1 ]; then
+  echo "==> Caddy (HTTPS)"
+  cat > /etc/caddy/Caddyfile <<CADDY
 $DOMAIN {
     reverse_proxy 127.0.0.1:8080
 }
 CADDY
-systemctl enable caddy
-systemctl restart caddy
+  systemctl enable caddy
+  systemctl restart caddy
+fi
 
 sleep 3
 systemctl --no-pager --lines=8 status locbot || true
@@ -101,3 +119,24 @@ Tayyor!
 Loglar : journalctl -u locbot -f
 Yangilash: cd $APP_DIR && sudo -u locbot git pull && sudo systemctl restart locbot
 DONE
+
+if [ "$USE_CADDY" = 0 ]; then
+  cat <<NGINX
+
+Sizning saytingiz 80/443 portlarni ishlatyapti, shuning uchun Caddy o'rnatilmadi (saytga tegilmadi).
+Bot 127.0.0.1:8080 da ishlayapti. $DOMAIN ni shu serverga yo'naltirib (DNS A yozuvi),
+mavjud nginx ga ALOHIDA fayl sifatida qo'shing (/etc/nginx/conf.d/locbot.conf):
+
+server {
+    listen 80;
+    server_name $DOMAIN;
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+    }
+}
+
+so'ng:  sudo nginx -t && sudo systemctl reload nginx && sudo certbot --nginx -d $DOMAIN
+NGINX
+fi
