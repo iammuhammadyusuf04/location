@@ -20,16 +20,30 @@
   #list b{color:#1e66f5}
   #list .dur{color:#b45309;font-weight:600}
   .pin{width:28px;height:28px;border-radius:50%;color:#fff;font:bold 13px/28px system-ui;text-align:center;border:2px solid #fff;box-shadow:0 1px 4px #0006}
+  #panel{position:fixed;inset:0;background:#fff;z-index:2000;display:flex;flex-direction:column}
+  #panel[hidden]{display:none}
+  #panel .bar{display:flex;gap:8px;align-items:center;padding:10px;background:#1e66f5;color:#fff;padding-top:max(10px,env(safe-area-inset-top))}
+  #panel .bar b{flex:1}
+  #panel .bar button,#panel .bar input{font:inherit;border:0;border-radius:6px;padding:6px 10px}
+  #panel .days{flex:1;overflow:auto;padding-bottom:env(safe-area-inset-bottom)}
+  #panel h3{margin:0;padding:8px 12px;background:#f3f4f6;font-size:13px;color:#555}
+  .day{display:flex;gap:10px;padding:12px;border-bottom:1px solid #eee;cursor:pointer}
+  .day.sel{background:#e8f0fe}
+  .day .r{font-weight:600;flex:1}.day .d{color:#666}.day .n{color:#1e66f5;min-width:90px;text-align:right}
 </style>
 </head>
 <body>
 <header>
   <button id="prev">‹</button>
-  <input id="date" type="date">
+  <button id="daysBtn">📅 <span id="title">Kunlar</span></button>
   <button id="next">›</button>
   <span class="sp" id="info"></span>
 </header>
 <div id="map"></div>
+<div id="panel" hidden>
+  <div class="bar"><b>Kunlar</b><input id="date" type="date" aria-label="Sana tanlash"><button id="close">✕</button></div>
+  <div class="days"></div>
+</div>
 <ul id="list"></ul>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="/app.js"></script>

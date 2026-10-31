@@ -176,9 +176,25 @@ def web_user_id() -> int:
     return row[0] if row else 0
 
 
-async def api_points(request: web.Request) -> web.Response:
+def check_key(request: web.Request):
     if not hmac.compare_digest(request.headers.get("X-Key", ""), WEB_KEY):
         raise web.HTTPUnauthorized()
+
+
+async def api_days(request: web.Request) -> web.Response:
+    """Ma'lumoti bor barcha kunlar va ulardagi nuqtalar soni."""
+    check_key(request)
+    with db() as con:
+        rows = con.execute("SELECT ts FROM points WHERE user_id=?", (web_user_id(),)).fetchall()
+    counts: dict[str, int] = {}
+    for (ts,) in rows:
+        d = datetime.fromtimestamp(ts, TZ).strftime("%Y-%m-%d")
+        counts[d] = counts.get(d, 0) + 1
+    return web.json_response([{"date": d, "n": n} for d, n in sorted(counts.items(), reverse=True)])
+
+
+async def api_points(request: web.Request) -> web.Response:
+    check_key(request)
     try:
         day = datetime.strptime(request.query.get("date", ""), "%Y-%m-%d").date()
     except ValueError:
@@ -205,6 +221,7 @@ async def start_web(app: Application):
     wa = web.Application()
     wa.router.add_get("/", index)
     wa.router.add_get("/api/points", api_points)
+    wa.router.add_get("/api/days", api_days)
     wa.router.add_static("/", WEB_DIR)
     runner = web.AppRunner(wa)
     await runner.setup()

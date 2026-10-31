@@ -25,3 +25,8 @@ Lokatsiya baribir Telegram orqali yuboriladi; xaritani esa telefonda o'rnatiladi
 4. Botga `/app` yozing — kelgan havolani telefonda oching va «Bosh ekranga qo'shish» ni bosing.
 
 Xaritada bir joyda (`STOP_RADIUS_M`, standart 100 m ichida) turgan nuqtalar bitta raqamlangan belgiga birlashadi va «08:10–09:40 (1 soat 30 daq)» ko'rinishida turgan vaqti yoziladi. Xaritani istalgancha yaqinlashtirish mumkin.
+
+## Kunlar kesimida ko'rish va telefonda saqlash
+- Ilovada 📅 tugmasi kunlar ro'yxatini ochadi: **Bugun, Kecha, 4 kun avval, 1 oy avval** ... (oylar bo'yicha guruhlangan, har kunda nuqtalar soni bilan). ‹ › tugmalari kunlar orasida yuradi, sana tanlagich ham bor.
+- Ilova ochilganda barcha o'tgan kunlar fonda telefon xotirasiga (IndexedDB) yuklab qo'yiladi (ro'yxatda 📱 belgisi). Keyin ular internetsiz ham ochiladi. Faqat bugungi kun har safar serverdan yangilanadi.
+- Ko'rilgan xarita bo'laklari ham keshlanadi, shuning uchun oldin ko'rgan joylaringiz oflayn ham ko'rinadi.

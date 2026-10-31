@@ -1,49 +1,74 @@
 const $ = s => document.querySelector(s);
 const pad = n => String(n).padStart(2, "0");
 const iso = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const MONTHS = ["Yanvar", "Fevral", "Mart", "Aprel", "May", "Iyun", "Iyul", "Avgust", "Sentabr", "Oktyabr", "Noyabr", "Dekabr"];
 
-// /app buyrug'i bergan havola: https://.../#key=XXXX
-const m = location.hash.match(/key=([^&]+)/);
-if (m) { localStorage.locKey = decodeURIComponent(m[1]); }
+// /app buyrug'i bergan havola: https://.../#key=XXXX&date=YYYY-MM-DD
+const km = location.hash.match(/key=([^&]+)/);
 const dm = location.hash.match(/date=(\d{4}-\d{2}-\d{2})/);
-if (m || dm) history.replaceState(null, "", "/");
+if (km) localStorage.locKey = decodeURIComponent(km[1]);
+if (km || dm) history.replaceState(null, "", "/");
 
-const map = L.map("map").setView([41.3, 69.27], 12);
-L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19, attribution: "© OpenStreetMap"
-}).addTo(map);
-const layer = L.layerGroup().addTo(map);
-$("#date").value = dm ? dm[1] : iso(new Date());
+// ---------- Telefon xotirasi (IndexedDB): har bir kun alohida saqlanadi ----------
+const idb = new Promise((res, rej) => {
+  const r = indexedDB.open("locdiary", 1);
+  r.onupgradeneeded = () => r.result.createObjectStore("days", { keyPath: "date" });
+  r.onsuccess = () => res(r.result);
+  r.onerror = () => rej(r.error);
+});
+const tx = async (mode, fn) => {
+  const db = await idb;
+  return new Promise((res, rej) => {
+    const t = db.transaction("days", mode), req = fn(t.objectStore("days"));
+    t.oncomplete = () => res(req.result);
+    t.onerror = () => rej(t.error);
+  });
+};
+const getDay = d => tx("readonly", s => s.get(d));
+const putDay = rec => tx("readwrite", s => s.put(rec));
+const allDays = () => tx("readonly", s => s.getAll());
+if (navigator.storage?.persist) navigator.storage.persist(); // brauzer o'zi o'chirib yubormasin
 
-async function load(fit = true) {
-  const date = $("#date").value;
-  let r = await fetch(`/api/points?date=${date}`, { headers: { "X-Key": localStorage.locKey || "" } });
+async function api(path) {
+  const r = await fetch(path, { headers: { "X-Key": localStorage.locKey || "" } });
   if (r.status === 401) {
     const k = prompt("Kirish kaliti (WEB_KEY):");
-    if (!k) return;
+    if (!k) throw new Error("401");
     localStorage.locKey = k;
-    return load(fit);
+    return api(path);
   }
-  const { points, stops } = await r.json();
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+async function fetchDay(date) {
+  const { points, stops } = await api(`/api/points?date=${date}`);
+  // o'tgan kun tugallangan: qayta yuklash shart emas. Bugun doim yangilanadi.
+  const rec = { date, points, stops, final: date < iso(new Date()), saved: Date.now() };
+  await putDay(rec);
+  return rec;
+}
+
+// ---------- Xarita ----------
+const map = L.map("map").setView([41.3, 69.27], 12);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+const layer = L.layerGroup().addTo(map);
+let date = dm ? dm[1] : iso(new Date());
+
+function render({ points, stops }, fit) {
   layer.clearLayers();
   const list = $("#list"); list.innerHTML = "";
   $("#info").textContent = stops.length ? `${stops.length} ta joy` : "Ma'lumot yo'q";
   if (!stops.length) return;
 
-  // yo'l chizig'i + har bir yozilgan nuqta (kichik)
   const path = points.map(p => [p.lat, p.lon]);
   L.polyline(path, { color: "#1e66f5", weight: 4, opacity: .8 }).addTo(layer);
   points.forEach(p => L.circleMarker([p.lat, p.lon], { radius: 3, color: "#1e66f5", weight: 1, fillColor: "#fff", fillOpacity: 1 })
     .bindTooltip(p.t).addTo(layer));
 
-  // to'xtash joylari: raqamlangan markerlar, tooltipda vaqt va davomiylik
   const markers = stops.map((st, i) => {
     const color = i === 0 ? "#16a34a" : i === stops.length - 1 ? "#dc2626" : "#1e66f5";
-    const icon = L.divIcon({
-      className: "",
-      html: `<div class="pin" style="background:${color}">${i + 1}</div>`,
-      iconSize: [28, 28], iconAnchor: [14, 14]
-    });
+    const icon = L.divIcon({ className: "", html: `<div class="pin" style="background:${color}">${i + 1}</div>`, iconSize: [28, 28], iconAnchor: [14, 14] });
     const when = st.t0 === st.t1 ? st.t0 : `${st.t0}–${st.t1}`;
     const box = document.createElement("div");
     box.innerHTML = "<b></b><br><span></span>";
@@ -64,10 +89,80 @@ async function load(fit = true) {
   if (fit) map.fitBounds(L.latLngBounds(path), { padding: [30, 30], maxZoom: 17 });
 }
 
-const shift = n => { const d = new Date($("#date").value); d.setDate(d.getDate() + n); $("#date").value = iso(d); load(); };
+// ---------- Kunni ochish: avval telefondagi nusxa, keyin serverdan yangilash ----------
+const rel = d => {
+  const n = Math.round((new Date(iso(new Date())) - new Date(d)) / 864e5);
+  if (n <= 0) return "Bugun";
+  if (n === 1) return "Kecha";
+  if (n < 30) return `${n} kun avval`;
+  return `${Math.round(n / 30)} oy avval`;
+};
+
+async function load(fit = true) {
+  const d = date;
+  $("#title").textContent = `${rel(d)} · ${d}`;
+  const cached = await getDay(d);
+  if (cached) render(cached, fit);
+  if (!cached?.final) {
+    try {
+      const rec = await fetchDay(d);
+      if (d === date) render(rec, fit && !cached);
+    } catch (e) {
+      if (!cached) { layer.clearLayers(); $("#list").innerHTML = ""; $("#info").textContent = "Oflayn: bu kun saqlanmagan"; }
+    }
+  }
+}
+
+function setDate(d) { date = d; $("#panel").hidden = true; load(); }
+const shift = n => { const x = new Date(date); x.setDate(x.getDate() + n); setDate(iso(x)); };
 $("#prev").onclick = () => shift(-1);
 $("#next").onclick = () => shift(1);
-$("#date").onchange = () => load();
-setInterval(() => { if (!document.hidden && $("#date").value === iso(new Date())) load(false); }, 60000);
-load();
+$("#date").onchange = e => e.target.value && setDate(e.target.value);
+
+// ---------- Kunlar ro'yxati (Bugun, Kecha, 4 kun avval, 1 oy avval ...) ----------
+async function showPanel() {
+  const cached = new Map((await allDays()).map(r => [r.date, r]));
+  const server = JSON.parse(localStorage.locDays || "[]");
+  const days = new Map(server.map(x => [x.date, x.n]));
+  cached.forEach((r, d) => days.set(d, days.get(d) ?? r.points.length));
+  days.set(iso(new Date()), days.get(iso(new Date())) ?? 0);
+  const box = $("#panel .days"); box.innerHTML = "";
+  let month = "";
+  [...days].sort((a, b) => b[0].localeCompare(a[0])).forEach(([d, n]) => {
+    const [y, m] = d.split("-");
+    if (`${y}-${m}` !== month) {
+      month = `${y}-${m}`;
+      const h = document.createElement("h3"); h.textContent = `${y} ${MONTHS[+m - 1]}`; box.append(h);
+    }
+    const row = document.createElement("div");
+    row.className = "day" + (d === date ? " sel" : "");
+    const saved = cached.get(d)?.final ? " 📱" : "";
+    row.innerHTML = "<span class=r></span><span class=d></span><span class=n></span>";
+    row.children[0].textContent = rel(d);
+    row.children[1].textContent = d.slice(5).replace("-", ".");
+    row.children[2].textContent = `${n} nuqta${saved}`;
+    row.onclick = () => setDate(d);
+    box.append(row);
+  });
+  $("#panel").hidden = false;
+}
+$("#daysBtn").onclick = showPanel;
+$("#close").onclick = () => $("#panel").hidden = true;
+
+// ---------- Fon sinxronlash: barcha o'tgan kunlarni telefonga yuklab qo'yish ----------
+async function sync() {
+  try {
+    const days = await api("/api/days");
+    localStorage.locDays = JSON.stringify(days);
+    const today = iso(new Date());
+    for (const { date: d } of days) {
+      if (d >= today) continue;
+      const have = await getDay(d);
+      if (!have?.final) await fetchDay(d);
+    }
+  } catch (e) { /* oflayn: mavjud nusxalar bilan ishlayveramiz */ }
+}
+
+setInterval(() => { if (!document.hidden && date === iso(new Date())) load(false); }, 60000);
+load().then(sync);
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
