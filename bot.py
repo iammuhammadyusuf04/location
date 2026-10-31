@@ -6,6 +6,7 @@
   interaktiv xarita (HTML) ko'rinishida yuboradi.
 """
 import asyncio
+import hmac
 import io
 import logging
 import os
@@ -13,9 +14,11 @@ import sqlite3
 import time
 from datetime import datetime, timedelta
 from datetime import time as dtime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
+from aiohttp import web
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -25,6 +28,10 @@ TZ = ZoneInfo(os.getenv("TZ", "Asia/Tashkent"))
 SUMMARY_TIME = os.getenv("SUMMARY_TIME", "23:55")
 INTERVAL_MIN = int(os.getenv("INTERVAL_MIN", "10"))
 DB_PATH = os.getenv("DB_PATH", "locations.db")
+WEB_KEY = os.getenv("WEB_KEY", "")  # PWA ga kirish kaliti; bo'sh bo'lsa veb o'chiq
+WEB_PORT = int(os.getenv("PORT", "8080"))
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
+WEB_DIR = Path(__file__).parent / "web"
 
 log = logging.getLogger("locbot")
 
@@ -149,6 +156,53 @@ async def send_summary(bot, chat_id: int, user_id: int, day):
     )
 
 
+# ---------- PWA (veb-ilova) ----------
+def web_user_id() -> int:
+    if ALLOWED_USER_ID:
+        return ALLOWED_USER_ID
+    with db() as con:
+        row = con.execute("SELECT user_id FROM points ORDER BY ts DESC LIMIT 1").fetchone()
+    return row[0] if row else 0
+
+
+async def api_points(request: web.Request) -> web.Response:
+    if not hmac.compare_digest(request.headers.get("X-Key", ""), WEB_KEY):
+        raise web.HTTPUnauthorized()
+    try:
+        day = datetime.strptime(request.query.get("date", ""), "%Y-%m-%d").date()
+    except ValueError:
+        day = datetime.now(TZ).date()
+    rows = get_points(web_user_id(), day)
+    return web.json_response([
+        {"t": datetime.fromtimestamp(ts, TZ).strftime("%H:%M"), "ts": ts, "lat": lat, "lon": lon, "addr": addr}
+        for ts, lat, lon, addr in rows
+    ])
+
+
+async def index(request: web.Request) -> web.FileResponse:
+    return web.FileResponse(WEB_DIR / "index.html")
+
+
+async def start_web(app: Application):
+    if not WEB_KEY:
+        log.warning("WEB_KEY berilmagan — PWA o'chirilgan")
+        return
+    wa = web.Application()
+    wa.router.add_get("/", index)
+    wa.router.add_get("/api/points", api_points)
+    wa.router.add_static("/", WEB_DIR)
+    runner = web.AppRunner(wa)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", WEB_PORT).start()
+    app.bot_data["web_runner"] = runner
+    log.info("PWA: http://0.0.0.0:%s", WEB_PORT)
+
+
+async def stop_web(app: Application):
+    if runner := app.bot_data.get("web_runner"):
+        await runner.cleanup()
+
+
 # ---------- Handlerlar ----------
 def allowed(update: Update) -> bool:
     return not ALLOWED_USER_ID or (update.effective_user and update.effective_user.id == ALLOWED_USER_ID)
@@ -175,7 +229,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1) 📎 → Lokatsiya → «Jonli lokatsiyani ulashish» (8 soat/doimiy) ni tanlang.\n"
         f"2) Men har {INTERVAL_MIN} daqiqada manzilingizni yozib boraman.\n"
         f"3) Kun oxirida ({SUMMARY_TIME}) xaritada yo'lingizni yuboraman.\n\n"
-        "/today — bugungi xarita\n/yesterday — kechagi xarita"
+        "/app — xarita ilovasi (PWA) havolasi\n/today — bugungi xarita\n/yesterday — kechagi xarita"
+    )
+
+
+async def cmd_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    if not (WEB_KEY and PUBLIC_URL):
+        await update.message.reply_text("PWA sozlanmagan: .env da WEB_KEY va PUBLIC_URL ni to'ldiring.")
+        return
+    await update.message.reply_text(
+        f"{PUBLIC_URL}/#key={WEB_KEY}\n\nBu havolani ochib, «Bosh ekranga qo'shish» (Install) ni bosing."
     )
 
 
@@ -201,8 +266,9 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(start_web).post_shutdown(stop_web).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("yesterday", cmd_yesterday))
     app.add_handler(MessageHandler(filters.LOCATION, on_location))

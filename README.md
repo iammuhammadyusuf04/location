@@ -15,3 +15,11 @@ Telegram bot: jonli lokatsiya bo'yicha har 10 daqiqada manzilingizni yozadi va k
 - `/today`, `/yesterday` — istalgan vaqtda xaritani so'rash.
 
 Eslatma: Telegram jonli lokatsiyani maksimal 8 soatga (yoki "doimiy") ulashadi; tugasa qayta ulashing. Bot 24/7 ishlaydigan serverda turishi kerak.
+
+## PWA (xarita ilovasi)
+Lokatsiya baribir Telegram orqali yuboriladi; xaritani esa telefonda o'rnatiladigan ilova ko'rsatadi (sana tanlash, yo'l chizig'i, nuqtalar, manzillar ro'yxati, bugun uchun har daqiqada avtomatik yangilanish).
+
+1. `.env` ga `WEB_KEY` (uzun maxfiy so'z) va `PUBLIC_URL` (HTTPS manzil) ni yozing.
+2. Botni ishga tushiring: veb-server `PORT` (standart 8080) da ochiladi.
+3. HTTPS kerak (PWA o'rnatilishi uchun). Eng oson yo'l: `cloudflared tunnel --url http://localhost:8080` yoki Caddy/nginx reverse proxy.
+4. Botga `/app` yozing — kelgan havolani telefonda oching va «Bosh ekranga qo'shish» ni bosing.
