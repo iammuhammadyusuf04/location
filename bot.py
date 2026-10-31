@@ -27,7 +27,11 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 # Ruxsat etilgan Telegram ID lar (vergul bilan). Bo'sh bo'lsa - hamma uchun ochiq.
-ALLOWED_IDS = {int(x) for x in re.split(r"[,\s]+", os.getenv("ALLOWED_USER_ID", "")) if x}
+ALLOWED_LIST = [int(x) for x in re.split(r"[,\s]+", os.getenv("ALLOWED_USER_ID", "")) if x]
+ALLOWED_IDS = set(ALLOWED_LIST)
+# Egasi (ota-ona): xabarlar, ogohlantirishlar va hisobotlar shu odamga keladi. Bo'sh bo'lsa - birinchi ruxsat etilgan ID.
+OWNER_IDS = [int(x) for x in re.split(r"[,\s]+", os.getenv("OWNER_ID", "")) if x] or ALLOWED_LIST[:1]
+ALERT_AFTER_MIN = int(os.getenv("ALERT_AFTER_MIN", "60"))  # shuncha daqiqa signal bo'lmasa egasiga xabar
 TZ = ZoneInfo(os.getenv("TZ", "Asia/Tashkent"))
 SUMMARY_TIME = os.getenv("SUMMARY_TIME", "23:55")
 INTERVAL_MIN = int(os.getenv("INTERVAL_MIN", "10"))
@@ -65,6 +69,10 @@ def db() -> sqlite3.Connection:
         "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, chat_id INTEGER, message_id INTEGER, "
         "name TEXT, color TEXT, prompt_id INTEGER, stopped INTEGER DEFAULT 0)"
     )
+    tcols = {r[1] for r in con.execute("PRAGMA table_info(trackers)")}
+    for col in ("alerted", "prompt_chat"):
+        if col not in tcols:
+            con.execute(f"ALTER TABLE trackers ADD COLUMN {col} INTEGER DEFAULT 0")
     con.execute(
         "CREATE TABLE IF NOT EXISTS tracker_live ("
         "tracker_id INTEGER PRIMARY KEY, lat REAL, lon REAL, seen INTEGER, expires INTEGER)"
@@ -127,7 +135,7 @@ def tracker_by_msg(chat_id, message_id):
 
 def tracker_by_prompt(chat_id, prompt_id):
     with db() as con:
-        r = con.execute("SELECT * FROM trackers WHERE chat_id=? AND prompt_id=?", (chat_id, prompt_id)).fetchone()
+        r = con.execute("SELECT * FROM trackers WHERE prompt_chat=? AND prompt_id=?", (chat_id, prompt_id)).fetchone()
     return dict(r) if r else None
 
 
@@ -136,18 +144,37 @@ def user_trackers(user_id) -> list[dict]:
         return [dict(r) for r in con.execute("SELECT * FROM trackers WHERE user_id=? ORDER BY id", (user_id,))]
 
 
+def visible_trackers(user_id) -> list[dict]:
+    """Egasi hamma joylashuvni ko'radi, boshqalar faqat o'zinikini."""
+    return all_trackers() if user_id in OWNER_IDS else user_trackers(user_id)
+
+
 def all_trackers() -> list[dict]:
     with db() as con:
         return [dict(r) for r in con.execute("SELECT * FROM trackers ORDER BY id")]
 
 
 def find_tracker(user_id, name):
-    return next((t for t in user_trackers(user_id) if norm(t["name"]) == norm(name)), None)
+    return next((t for t in visible_trackers(user_id) if norm(t["name"]) == norm(name)), None)
 
 
-def set_prompt(tid, message_id):
+def set_prompt(tid, chat_id, message_id):
     with db() as con:
-        con.execute("UPDATE trackers SET prompt_id=? WHERE id=?", (message_id, tid))
+        con.execute("UPDATE trackers SET prompt_id=?, prompt_chat=? WHERE id=?", (message_id, chat_id, tid))
+
+
+def set_alerted(tid, flag: bool):
+    with db() as con:
+        con.execute("UPDATE trackers SET alerted=? WHERE id=?", (int(flag), tid))
+
+
+def silent_live(now):
+    """Jonli (yoki pauzadagi) izlovchilar, signali ALERT_AFTER_MIN dan beri yo'q va hali xabar berilmagan."""
+    with db() as con:
+        return con.execute(
+            "SELECT t.*, l.seen AS seen FROM tracker_live l JOIN trackers t ON t.id=l.tracker_id "
+            "WHERE t.stopped=0 AND t.alerted=0 AND l.expires!=0 AND l.seen<?", (now - ALERT_AFTER_MIN * 60,)
+        ).fetchall()
 
 
 def rename_tracker(tid, name) -> str | None:
@@ -288,7 +315,7 @@ def build_stops(points) -> list[dict]:
 
 def day_groups(user_id, day):
     """[(izlovchi, nuqtalar)] - shu kuni nuqtasi bor izlovchilar."""
-    groups = [(t, get_points(t["id"], day)) for t in user_trackers(user_id)]
+    groups = [(t, get_points(t["id"], day)) for t in visible_trackers(user_id)]
     return [(t, p) for t, p in groups if p]
 
 
@@ -412,6 +439,18 @@ def allowed(update: Update) -> bool:
     return not ALLOWED_IDS or (update.effective_user and update.effective_user.id in ALLOWED_IDS)
 
 
+async def notify(bot, t, text, **kw):
+    """Egasiga (bo'lmasa joylashuv chatiga) xabar yuboradi; birinchi yuborilgan xabarni qaytaradi."""
+    first = None
+    for chat in OWNER_IDS or [t["chat_id"]]:
+        try:
+            m = await bot.send_message(chat, text, **kw)
+            first = first or m
+        except Exception as e:  # masalan, egasi botga /start bosmagan
+            log.warning("xabar yuborilmadi (%s): %s", chat, e)
+    return first
+
+
 async def record(bot, t, lat, lon, now, stale_min=0):
     """Nuqtani saqlaydi va botga xabar yozadi."""
     prev = last_point(t["id"])
@@ -421,7 +460,7 @@ async def record(bot, t, lat, lon, now, stale_min=0):
         addr = await asyncio.to_thread(reverse_geocode, lat, lon)
     save_point(t, now, lat, lon, addr)
     note = f"\n⚠️ signal {stale_min} daq oldin uzilgan, oxirgi ma'lum joy" if stale_min else ""
-    await bot.send_message(t["chat_id"], f"📍 {emoji_of(t)} {t['name']} · {datetime.fromtimestamp(now, TZ):%H:%M} — {addr}{note}")
+    await notify(bot, t, f"📍 {emoji_of(t)} {t['name']} · {datetime.fromtimestamp(now, TZ):%H:%M} — {addr}{note}")
 
 
 async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -440,15 +479,21 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if t["stopped"]:
         return
     set_live(t["id"], lat, lon, now, int(msg.date.timestamp()) + live if live else 0)
+    if t.get("alerted"):  # signal qaytdi
+        set_alerted(t["id"], False)
+        await notify(context.bot, t, f"✅ {emoji_of(t)} {t['name']} signali qayta tiklandi.")
     if is_new:
-        p = await context.bot.send_message(
-            chat_id,
+        p = await notify(
+            context.bot, t,
             f"✅ Yangi jonli joylashuv qo'shildi: {emoji_of(t)} {t['name']}\n\n"
             "Nom berish uchun shu xabarga javob qilib nom yozing.\n"
             "Rangni o'zgartirish: /color Nom = Rang",
             reply_markup=ForceReply(selective=True, input_field_placeholder="Masalan: Telefonim"),
         )
-        set_prompt(t["id"], p.message_id)
+        if p:
+            set_prompt(t["id"], p.chat_id, p.message_id)
+        if chat_id not in OWNER_IDS:
+            await context.bot.send_message(chat_id, "✅ Joylashuvingiz ulandi.")
     if now - last_ts(t["id"]) >= INTERVAL_MIN * 60 - 5:
         await record(context.bot, t, lat, lon, now)
 
@@ -456,12 +501,19 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     """Telegram joy o'zgarmasa yangilanish yubormaydi - shunda ham har INTERVAL_MIN da yozib boramiz."""
     now = int(time.time())
+    for row in silent_live(now):
+        t = dict(row)
+        set_alerted(t["id"], True)
+        lp = last_point(t["id"])
+        where = f"\nOxirgi joy ({datetime.fromtimestamp(lp['ts'], TZ):%H:%M}): {lp['addr']}" if lp else ""
+        await notify(context.bot, t, f"⚠️ {emoji_of(t)} {t['name']} dan signal uzildi — "
+                                     f"oxirgi yangilanishdan {fmt_dur((now - t['seen']) // 60)} o'tdi.{where}")
     for row in active_live(now):
         t = dict(row)
         if now - t["seen"] > PAUSE_AFTER_H * 3600:  # doimiy ulashish uzilib qolgan bo'lishi mumkin
-            set_live(t["id"], t["lat"], t["lon"], t["seen"], 0)
-            await context.bot.send_message(
-                t["chat_id"],
+            set_live(t["id"], t["lat"], t["lon"], t["seen"], -1)
+            await notify(
+                context.bot, t,
                 f"⏸ {emoji_of(t)} {t['name']}: {PAUSE_AFTER_H}+ soatdan beri signal yo'q, kuzatuv pauza qilindi. "
                 "Yangilanish kelsa, o'zi davom etadi.",
             )
@@ -498,7 +550,7 @@ def arg_pair(context) -> tuple[str, str]:
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
-    ts = user_trackers(update.effective_user.id)
+    ts = visible_trackers(update.effective_user.id)
     if not ts:
         await update.message.reply_text("Hali jonli joylashuv yo'q. Jonli lokatsiya ulashing.")
         return
@@ -541,7 +593,7 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
     name = " ".join(context.args).strip()
-    ts = user_trackers(update.effective_user.id)
+    ts = visible_trackers(update.effective_user.id)
     if name:
         t = find_tracker(update.effective_user.id, name)
         ts = [t] if t else []
@@ -591,7 +643,10 @@ async def cmd_yesterday(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     day = datetime.now(TZ).date()
-    for user_id, chat_id in active_users(day):
+    targets = [(o, o) for o in OWNER_IDS] or active_users(day)
+    for user_id, chat_id in targets:
+        if not day_groups(user_id, day):
+            continue
         try:
             await send_summary(context.bot, chat_id, user_id, day)
         except Exception:

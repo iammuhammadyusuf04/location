@@ -37,3 +37,7 @@ Xaritada bir joyda (`STOP_RADIUS_M`, standart 100 m ichida) turgan nuqtalar bitt
 - `/list` — joylashuvlar; `/rename Eski = Yangi`; `/color Nom = Qizil` (yoki `#RRGGBB`); `/stop [Nom]` — to'xtatish.
 - PWA da har joylashuv o'z rangi va nomi bilan chiziladi; yuqoridagi rangli tugmalar (chip) orqali birini yashirish/ko'rsatish mumkin. Nom/rang o'zgartirilsa, eski kunlarda ham yangisi ko'rinadi.
 - Bir nechta odam (masalan oila) ishlatishi uchun `ALLOWED_USER_ID` ga ularning ID larini vergul bilan yozing. Eslatma: PWA hamma joylashuvlarni ko'rsatadi, `WEB_KEY` ni faqat ishonchli odamlarga bering.
+
+## Egasi va «signal uzildi» ogohlantirishi
+- `OWNER_ID` (yoki `ALLOWED_USER_ID` dagi birinchi ID) — **egasi**. Barcha 10 daqiqalik xabarlar, ogohlantirishlar va kunlik hisobotlar egasiga keladi (egasi botga bir marta `/start` bosgan bo'lishi kerak). Farzand o'z telefonidan faqat jonli lokatsiyani ulaydi; unga «Joylashuvingiz ulandi» deb yoziladi, xolos. Egasi `/list`, `/rename`, `/color`, `/stop` bilan hamma joylashuvni boshqaradi.
+- Biror joylashuvdan `ALERT_AFTER_MIN` (standart 60) daqiqa signal kelmasa, egasiga bir marta «⚠️ Ali dan signal uzildi — oxirgi joy: ...» yoziladi. Signal qaytsa «✅ Ali signali qayta tiklandi» keladi. Jonli lokatsiya muddati tugagan bo'lsa ham shunday ogohlantiradi.
