@@ -6,7 +6,7 @@ Telegram bot: jonli lokatsiya bo'yicha har 10 daqiqada manzilingizni yozadi va k
 1. @BotFather orqali bot yarating, tokenni oling.
 2. `pip install -r requirements.txt`
 3. `cp .env.example .env`, so'ng qiymatlarni to'ldiring (`ALLOWED_USER_ID` — faqat o'zingiz uchun).
-4. `set -a; source .env; set +a; python bot.py`
+4. `python bot.py` (bot `.env` faylini o'zi o'qiydi)
 
 ## Foydalanish
 - Botga `/start` yozing, so'ng 📎 → Lokatsiya → **Jonli lokatsiyani ulashish**.

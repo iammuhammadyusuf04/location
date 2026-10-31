@@ -25,6 +25,21 @@ from aiohttp import web
 from telegram import ForceReply, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+def _load_env():
+    """Yonidagi .env faylini o'qiydi (Windows'da ham ishlaydi). Bo'sh qiymatlar e'tiborga olinmaydi."""
+    path = Path(__file__).parent / ".env"
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, val = line.partition("=")
+            if val.strip().strip("\"'"):
+                os.environ.setdefault(key.strip(), val.strip().strip("\"'"))
+
+
+_load_env()
+
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 # Ruxsat etilgan Telegram ID lar (vergul bilan). Bo'sh bo'lsa - hamma uchun ochiq.
 ALLOWED_LIST = [int(x) for x in re.split(r"[,\s]+", os.getenv("ALLOWED_USER_ID", "")) if x]

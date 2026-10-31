@@ -2,3 +2,4 @@ python-telegram-bot[job-queue]>=21.0
 requests>=2.31
 folium>=0.17
 aiohttp>=3.9
+tzdata
