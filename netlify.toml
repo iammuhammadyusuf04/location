@@ -1,0 +1,9 @@
+# Netlify: faqat web/ papkasini statik sayt sifatida beradi (build kerak emas)
+[build]
+  publish = "web"
+  command = ""
+
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control = "no-cache"
