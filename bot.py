@@ -31,6 +31,7 @@ ALLOWED_IDS = {int(x) for x in re.split(r"[,\s]+", os.getenv("ALLOWED_USER_ID", 
 TZ = ZoneInfo(os.getenv("TZ", "Asia/Tashkent"))
 SUMMARY_TIME = os.getenv("SUMMARY_TIME", "23:55")
 INTERVAL_MIN = int(os.getenv("INTERVAL_MIN", "10"))
+PAUSE_AFTER_H = int(os.getenv("PAUSE_AFTER_H", "6"))  # shuncha soat signal bo'lmasa - pauza
 DB_PATH = os.getenv("DB_PATH", "locations.db")
 WEB_KEY = os.getenv("WEB_KEY", "")  # PWA ga kirish kaliti; bo'sh bo'lsa veb o'chiq
 WEB_PORT = int(os.getenv("PORT", "8080"))
@@ -457,6 +458,14 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     now = int(time.time())
     for row in active_live(now):
         t = dict(row)
+        if now - t["seen"] > PAUSE_AFTER_H * 3600:  # doimiy ulashish uzilib qolgan bo'lishi mumkin
+            set_live(t["id"], t["lat"], t["lon"], t["seen"], 0)
+            await context.bot.send_message(
+                t["chat_id"],
+                f"⏸ {emoji_of(t)} {t['name']}: {PAUSE_AFTER_H}+ soatdan beri signal yo'q, kuzatuv pauza qilindi. "
+                "Yangilanish kelsa, o'zi davom etadi.",
+            )
+            continue
         if now - last_ts(t["id"]) >= INTERVAL_MIN * 60 - 5:
             stale = (now - t["seen"]) // 60
             try:

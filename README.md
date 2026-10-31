@@ -14,7 +14,7 @@ Telegram bot: jonli lokatsiya bo'yicha har 10 daqiqada manzilingizni yozadi va k
 - Kun oxirida (`SUMMARY_TIME`) vaqtlar va turgan davomiyligi bilan manzillar ro'yxati hamda PWA xaritasiga havola keladi.
 - `/today`, `/yesterday` — istalgan vaqtda xaritani so'rash.
 
-Eslatma: Telegram jonli lokatsiyani maksimal 8 soatga (yoki "doimiy") ulashadi; tugasa qayta ulashing. Bot 24/7 ishlaydigan serverda turishi kerak.
+Eslatma: Jonli lokatsiyani ulashishda **«Doimiy» (Until I turn it off)** ni tanlang — 8 soatlik cheklov bo'lmaydi. Signal `PAUSE_AFTER_H` (standart 6) soat kelmasa, bot bir marta xabar berib pauza qiladi va yangilanish kelganda o'zi davom etadi. Bot 24/7 ishlaydigan serverda turishi kerak.
 
 ## PWA (xarita ilovasi)
 Lokatsiya baribir Telegram orqali yuboriladi; xaritani esa telefonda o'rnatiladigan ilova ko'rsatadi (sana tanlash, yo'l chizig'i, nuqtalar, manzillar ro'yxati, bugun uchun har daqiqada avtomatik yangilanish).
