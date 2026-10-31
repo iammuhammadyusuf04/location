@@ -30,3 +30,10 @@ Xaritada bir joyda (`STOP_RADIUS_M`, standart 100 m ichida) turgan nuqtalar bitt
 - Ilovada 📅 tugmasi kunlar ro'yxatini ochadi: **Bugun, Kecha, 4 kun avval, 1 oy avval** ... (oylar bo'yicha guruhlangan, har kunda nuqtalar soni bilan). ‹ › tugmalari kunlar orasida yuradi, sana tanlagich ham bor.
 - Ilova ochilganda barcha o'tgan kunlar fonda telefon xotirasiga (IndexedDB) yuklab qo'yiladi (ro'yxatda 📱 belgisi). Keyin ular internetsiz ham ochiladi. Faqat bugungi kun har safar serverdan yangilanadi.
 - Ko'rilgan xarita bo'laklari ham keshlanadi, shuning uchun oldin ko'rgan joylaringiz oflayn ham ko'rinadi.
+
+## Bir nechta jonli joylashuv: nom va rang
+- Botga yuborilgan **har bir jonli lokatsiya alohida joylashuv** bo'ladi (masalan telefonim, onam, mashina). Bot yangi joylashuvga avtomatik nom («Joylashuv 1») va rang beradi, so'ng nom so'raydi: shu xabarga **javob qilib** nom yozing.
+- **Nom ham, rang ham takrorlanmaydi**: band nom yoki rang tanlansa, bot rad etadi.
+- `/list` — joylashuvlar; `/rename Eski = Yangi`; `/color Nom = Qizil` (yoki `#RRGGBB`); `/stop [Nom]` — to'xtatish.
+- PWA da har joylashuv o'z rangi va nomi bilan chiziladi; yuqoridagi rangli tugmalar (chip) orqali birini yashirish/ko'rsatish mumkin. Nom/rang o'zgartirilsa, eski kunlarda ham yangisi ko'rinadi.
+- Bir nechta odam (masalan oila) ishlatishi uchun `ALLOWED_USER_ID` ga ularning ID larini vergul bilan yozing. Eslatma: PWA hamma joylashuvlarni ko'rsatadi, `WEB_KEY` ni faqat ishonchli odamlarga bering.

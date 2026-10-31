@@ -1,15 +1,17 @@
 """Jonli lokatsiya kuzatuvchi Telegram bot.
 
-- Jonli lokatsiya (Live Location) yuborsangiz, har INTERVAL_MIN daqiqada
-  qayerda ekaningizni manzil bilan yozib turadi.
-- Kun oxirida (SUMMARY_TIME) xaritada yurgan yo'lingizni rasm (PNG) va
-  interaktiv xarita (HTML) ko'rinishida yuboradi.
+- Botga bir nechta jonli lokatsiya (Live Location) qo'shish mumkin; har biri o'z
+  nomi va rangiga ega ("izlovchi"). Nom ham, rang ham takrorlanmaydi.
+- Har INTERVAL_MIN daqiqada har bir izlovchi uchun manzil botga yoziladi.
+- Kun oxirida (SUMMARY_TIME) hisobot, xaritada esa PWA ilovasi ko'rsatadi.
 """
 import asyncio
+import colorsys
 import hmac
 import io
 import logging
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime, timedelta
@@ -20,11 +22,12 @@ from zoneinfo import ZoneInfo
 
 import requests
 from aiohttp import web
-from telegram import Update
+from telegram import ForceReply, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID") or 0)
+# Ruxsat etilgan Telegram ID lar (vergul bilan). Bo'sh bo'lsa - hamma uchun ochiq.
+ALLOWED_IDS = {int(x) for x in re.split(r"[,\s]+", os.getenv("ALLOWED_USER_ID", "")) if x}
 TZ = ZoneInfo(os.getenv("TZ", "Asia/Tashkent"))
 SUMMARY_TIME = os.getenv("SUMMARY_TIME", "23:55")
 INTERVAL_MIN = int(os.getenv("INTERVAL_MIN", "10"))
@@ -36,55 +39,184 @@ WEB_DIR = Path(__file__).parent / "web"
 
 log = logging.getLogger("locbot")
 
+# (nomi, hex, emoji) - yangi izlovchiga ketma-ket band bo'lmagan rang beriladi
+PALETTE = [
+    ("Qizil", "#e11d48", "🔴"), ("Ko'k", "#2563eb", "🔵"), ("Yashil", "#16a34a", "🟢"),
+    ("To'q sariq", "#f97316", "🟠"), ("Binafsha", "#9333ea", "🟣"), ("Sariq", "#eab308", "🟡"),
+    ("Jigarrang", "#92400e", "🟤"), ("Pushti", "#ec4899", "🩷"), ("Moviy", "#0891b2", "🩵"),
+    ("Qora", "#111827", "⚫"),
+]
+
 
 # ---------- Ma'lumotlar bazasi ----------
 def db() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
     con.execute(
         "CREATE TABLE IF NOT EXISTS points ("
-        "user_id INTEGER, chat_id INTEGER, ts INTEGER, lat REAL, lon REAL, addr TEXT)"
+        "user_id INTEGER, chat_id INTEGER, ts INTEGER, lat REAL, lon REAL, addr TEXT, tracker_id INTEGER)"
     )
-    con.execute("CREATE INDEX IF NOT EXISTS ix_points ON points(user_id, ts)")
+    cols = {r[1] for r in con.execute("PRAGMA table_info(points)")}
+    if "tracker_id" not in cols:  # eski bazadan o'tish
+        con.execute("ALTER TABLE points ADD COLUMN tracker_id INTEGER")
     con.execute(
-        "CREATE TABLE IF NOT EXISTS live ("
-        "user_id INTEGER PRIMARY KEY, chat_id INTEGER, lat REAL, lon REAL, seen INTEGER, expires INTEGER)"
+        "CREATE TABLE IF NOT EXISTS trackers ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, chat_id INTEGER, message_id INTEGER, "
+        "name TEXT, color TEXT, prompt_id INTEGER, stopped INTEGER DEFAULT 0)"
     )
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS tracker_live ("
+        "tracker_id INTEGER PRIMARY KEY, lat REAL, lon REAL, seen INTEGER, expires INTEGER)"
+    )
+    con.execute("DROP TABLE IF EXISTS live")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_points ON points(tracker_id, ts)")
     return con
 
 
-def last_ts(user_id: int) -> int:
+def migrate_orphans():
+    """Izlovchisiz eski nuqtalarni har bir foydalanuvchi uchun «Asosiy» izlovchiga biriktiradi."""
     with db() as con:
-        row = con.execute("SELECT MAX(ts) FROM points WHERE user_id=?", (user_id,)).fetchone()
-    return row[0] or 0
+        for r in con.execute("SELECT DISTINCT user_id, chat_id FROM points WHERE tracker_id IS NULL").fetchall():
+            t = new_tracker(r["user_id"], r["chat_id"], 0, name="Asosiy", con=con)
+            con.execute("UPDATE points SET tracker_id=? WHERE tracker_id IS NULL AND user_id=?", (t["id"], r["user_id"]))
 
 
-def last_point(user_id: int):
+def norm(s: str) -> str:
+    return " ".join(s.lower().replace("’", "'").replace("‘", "'").split())
+
+
+def free_color(con) -> str:
+    used = {r[0].lower() for r in con.execute("SELECT color FROM trackers")}
+    for _, hx, _ in PALETTE:
+        if hx not in used:
+            return hx
+    h = 0.0
+    while True:  # palitra tugasa - noyob rang hosil qilamiz
+        h = (h + 0.618034) % 1
+        hx = "#%02x%02x%02x" % tuple(int(c * 255) for c in colorsys.hsv_to_rgb(h, 0.7, 0.85))
+        if hx not in used:
+            return hx
+
+
+def new_tracker(user_id, chat_id, message_id, name=None, con=None) -> dict:
+    own = con is None
+    con = con or db()
+    names = {norm(r[0]) for r in con.execute("SELECT name FROM trackers")}
+    if not name or norm(name) in names:
+        base, n = name or "Joylashuv", 1
+        while norm(f"{base} {n}") in names:
+            n += 1
+        name = f"{base} {n}"
+    cur = con.execute(
+        "INSERT INTO trackers (user_id, chat_id, message_id, name, color) VALUES (?,?,?,?,?)",
+        (user_id, chat_id, message_id, name, free_color(con)),
+    )
+    t = dict(con.execute("SELECT * FROM trackers WHERE id=?", (cur.lastrowid,)).fetchone())
+    if own:
+        con.commit()
+        con.close()
+    return t
+
+
+def tracker_by_msg(chat_id, message_id):
+    with db() as con:
+        r = con.execute("SELECT * FROM trackers WHERE chat_id=? AND message_id=?", (chat_id, message_id)).fetchone()
+    return dict(r) if r else None
+
+
+def tracker_by_prompt(chat_id, prompt_id):
+    with db() as con:
+        r = con.execute("SELECT * FROM trackers WHERE chat_id=? AND prompt_id=?", (chat_id, prompt_id)).fetchone()
+    return dict(r) if r else None
+
+
+def user_trackers(user_id) -> list[dict]:
+    with db() as con:
+        return [dict(r) for r in con.execute("SELECT * FROM trackers WHERE user_id=? ORDER BY id", (user_id,))]
+
+
+def all_trackers() -> list[dict]:
+    with db() as con:
+        return [dict(r) for r in con.execute("SELECT * FROM trackers ORDER BY id")]
+
+
+def find_tracker(user_id, name):
+    return next((t for t in user_trackers(user_id) if norm(t["name"]) == norm(name)), None)
+
+
+def set_prompt(tid, message_id):
+    with db() as con:
+        con.execute("UPDATE trackers SET prompt_id=? WHERE id=?", (message_id, tid))
+
+
+def rename_tracker(tid, name) -> str | None:
+    name = " ".join(name.split())[:40]
+    if not name:
+        return "Nom bo'sh bo'lmasin."
+    with db() as con:
+        if any(norm(r[0]) == norm(name) for r in con.execute("SELECT name FROM trackers WHERE id!=?", (tid,))):
+            return f"«{name}» nomi band, boshqa nom tanlang."
+        con.execute("UPDATE trackers SET name=? WHERE id=?", (name, tid))
+    return None
+
+
+def set_color(tid, spec) -> str | None:
+    spec = spec.strip()
+    hit = next((p for p in PALETTE if norm(p[0]) == norm(spec)), None)
+    if hit:
+        hx = hit[1]
+    elif re.fullmatch(r"#[0-9a-fA-F]{6}", spec):
+        hx = spec.lower()
+    else:
+        return "Rang topilmadi. Mavjud: " + ", ".join(p[0] for p in PALETTE) + " yoki #RRGGBB."
+    with db() as con:
+        if any(r[0].lower() == hx for r in con.execute("SELECT color FROM trackers WHERE id!=?", (tid,))):
+            return "Bu rang boshqa joylashuvda ishlatilgan, boshqa rang tanlang."
+        con.execute("UPDATE trackers SET color=? WHERE id=?", (hx, tid))
+    return None
+
+
+def set_stopped(tid, stopped: bool):
+    with db() as con:
+        con.execute("UPDATE trackers SET stopped=? WHERE id=?", (int(stopped), tid))
+        if stopped:
+            con.execute("DELETE FROM tracker_live WHERE tracker_id=?", (tid,))
+
+
+def emoji_of(t) -> str:
+    return next((p[2] for p in PALETTE if p[1] == t["color"].lower()), "●")
+
+
+def last_ts(tid: int) -> int:
+    with db() as con:
+        return con.execute("SELECT MAX(ts) FROM points WHERE tracker_id=?", (tid,)).fetchone()[0] or 0
+
+
+def last_point(tid: int):
     with db() as con:
         return con.execute(
-            "SELECT ts, lat, lon, addr FROM points WHERE user_id=? ORDER BY ts DESC LIMIT 1", (user_id,)
+            "SELECT ts, lat, lon, addr FROM points WHERE tracker_id=? ORDER BY ts DESC LIMIT 1", (tid,)
         ).fetchone()
 
 
-def set_live(user_id, chat_id, lat, lon, seen, expires):
+def set_live(tid, lat, lon, seen, expires):
     with db() as con:
-        con.execute("INSERT OR REPLACE INTO live VALUES (?,?,?,?,?,?)", (user_id, chat_id, lat, lon, seen, expires))
-
-
-def stop_live(user_id):
-    with db() as con:
-        con.execute("DELETE FROM live WHERE user_id=?", (user_id,))
+        con.execute("INSERT OR REPLACE INTO tracker_live VALUES (?,?,?,?,?)", (tid, lat, lon, seen, expires))
 
 
 def active_live(now):
     with db() as con:
         return con.execute(
-            "SELECT user_id, chat_id, lat, lon, seen FROM live WHERE expires>?", (now,)
+            "SELECT t.*, l.lat AS lat, l.lon AS lon, l.seen AS seen FROM tracker_live l "
+            "JOIN trackers t ON t.id=l.tracker_id WHERE l.expires>? AND t.stopped=0", (now,)
         ).fetchall()
 
 
-def save_point(user_id, chat_id, ts, lat, lon, addr):
+def save_point(t, ts, lat, lon, addr):
     with db() as con:
-        con.execute("INSERT INTO points VALUES (?,?,?,?,?,?)", (user_id, chat_id, ts, lat, lon, addr))
+        con.execute(
+            "INSERT INTO points VALUES (?,?,?,?,?,?,?)", (t["user_id"], t["chat_id"], ts, lat, lon, addr, t["id"])
+        )
 
 
 def day_bounds(day):
@@ -92,21 +224,20 @@ def day_bounds(day):
     return int(start.timestamp()), int((start + timedelta(days=1)).timestamp())
 
 
-def get_points(user_id: int, day):
+def get_points(tid: int, day):
     a, b = day_bounds(day)
     with db() as con:
-        return con.execute(
-            "SELECT ts, lat, lon, addr FROM points WHERE user_id=? AND ts>=? AND ts<? ORDER BY ts",
-            (user_id, a, b),
-        ).fetchall()
+        return [tuple(r) for r in con.execute(
+            "SELECT ts, lat, lon, addr FROM points WHERE tracker_id=? AND ts>=? AND ts<? ORDER BY ts", (tid, a, b)
+        )]
 
 
 def active_users(day):
     a, b = day_bounds(day)
     with db() as con:
-        return con.execute(
+        return [tuple(r) for r in con.execute(
             "SELECT DISTINCT user_id, chat_id FROM points WHERE ts>=? AND ts<?", (a, b)
-        ).fetchall()
+        )]
 
 
 # ---------- Manzil aniqlash (OpenStreetMap Nominatim) ----------
@@ -125,7 +256,7 @@ def reverse_geocode(lat: float, lon: float) -> str:
         return f"{lat:.5f}, {lon:.5f}"
 
 
-# ---------- Xarita ----------
+# ---------- To'xtashlar va hisobot ----------
 STOP_RADIUS_M = int(os.getenv("STOP_RADIUS_M", "100"))
 
 
@@ -154,66 +285,74 @@ def build_stops(points) -> list[dict]:
     return stops
 
 
-def render_html(points) -> bytes:
+def day_groups(user_id, day):
+    """[(izlovchi, nuqtalar)] - shu kuni nuqtasi bor izlovchilar."""
+    groups = [(t, get_points(t["id"], day)) for t in user_trackers(user_id)]
+    return [(t, p) for t, p in groups if p]
+
+
+def render_html(groups) -> bytes:
     import folium
 
-    latlons = [(p[1], p[2]) for p in points]
-    fmap = folium.Map(location=latlons[0], zoom_start=15)
-    if len(latlons) > 1:
-        folium.PolyLine(latlons, color="#1e66f5", weight=4).add_to(fmap)
-    for i, (ts, lat, lon, addr) in enumerate(points):
-        t = datetime.fromtimestamp(ts, TZ).strftime("%H:%M")
-        color = "green" if i == 0 else "red" if i == len(points) - 1 else "blue"
-        folium.Marker((lat, lon), popup=f"{t}<br>{addr}", tooltip=t, icon=folium.Icon(color=color)).add_to(fmap)
-    if len(latlons) > 1:
-        fmap.fit_bounds(latlons)
+    allll = [(p[1], p[2]) for _, pts in groups for p in pts]
+    fmap = folium.Map(location=allll[0], zoom_start=15)
+    for t, pts in groups:
+        latlons = [(p[1], p[2]) for p in pts]
+        if len(latlons) > 1:
+            folium.PolyLine(latlons, color=t["color"], weight=4).add_to(fmap)
+        for ts, lat, lon, addr in pts:
+            hm = datetime.fromtimestamp(ts, TZ).strftime("%H:%M")
+            folium.CircleMarker((lat, lon), radius=6, color=t["color"], fill=True, fill_opacity=1,
+                                popup=f"{t['name']} {hm}<br>{addr}", tooltip=f"{t['name']} {hm}").add_to(fmap)
+    if len(allll) > 1:
+        fmap.fit_bounds(allll)
     return fmap.get_root().render().encode()
 
 
-def summary_text(points, day) -> str:
-    stops = build_stops(points)
-    lines = [f"🗺 {day:%d.%m.%Y} — bugungi yo'lingiz ({len(stops)} ta joy):"]
-    for st in stops:
-        t0, t1 = (datetime.fromtimestamp(st[k], TZ).strftime("%H:%M") for k in ("from", "to"))
-        when = f"{t0}–{t1} ({fmt_dur(st['mins'])})" if st["mins"] else t0
-        lines.append(f"{when} — {st['addr']}")
+def summary_text(groups, day) -> str:
+    lines = [f"🗺 {day:%d.%m.%Y} — kunlik hisobot"]
+    for t, points in groups:
+        stops = build_stops(points)
+        lines.append(f"\n{emoji_of(t)} {t['name']} ({len(stops)} ta joy):")
+        for st in stops:
+            t0, t1 = (datetime.fromtimestamp(st[k], TZ).strftime("%H:%M") for k in ("from", "to"))
+            when = f"{t0}–{t1} ({fmt_dur(st['mins'])})" if st["mins"] else t0
+            lines.append(f"{when} — {st['addr']}")
     return "\n".join(lines)
 
 
 async def send_summary(bot, chat_id: int, user_id: int, day):
-    points = get_points(user_id, day)
-    if not points:
+    groups = day_groups(user_id, day)
+    if not groups:
         await bot.send_message(chat_id, f"{day:%d.%m.%Y} kuni uchun saqlangan lokatsiya yo'q.")
         return
-    text = summary_text(points, day)
+    text = summary_text(groups, day)
     for i in range(0, len(text), 4000):
         await bot.send_message(chat_id, text[i : i + 4000])
     if WEB_KEY and PUBLIC_URL:
         await bot.send_message(chat_id, f"🔎 Xaritada ko'rish (yaqinlashtirish mumkin): {PUBLIC_URL}/#key={WEB_KEY}&date={day:%Y-%m-%d}")
     else:
-        html = await asyncio.to_thread(render_html, points)
+        html = await asyncio.to_thread(render_html, groups)
         await bot.send_document(chat_id, io.BytesIO(html), filename=f"xarita_{day:%Y-%m-%d}.html")
 
 
 # ---------- PWA (veb-ilova) ----------
-def web_user_id() -> int:
-    if ALLOWED_USER_ID:
-        return ALLOWED_USER_ID
-    with db() as con:
-        row = con.execute("SELECT user_id FROM points ORDER BY ts DESC LIMIT 1").fetchone()
-    return row[0] if row else 0
-
-
 def check_key(request: web.Request):
     if not hmac.compare_digest(request.headers.get("X-Key", ""), WEB_KEY):
         raise web.HTTPUnauthorized()
+
+
+async def api_trackers(request: web.Request) -> web.Response:
+    check_key(request)
+    return web.json_response([{"id": t["id"], "name": t["name"], "color": t["color"], "stopped": bool(t["stopped"])}
+                              for t in all_trackers()])
 
 
 async def api_days(request: web.Request) -> web.Response:
     """Ma'lumoti bor barcha kunlar va ulardagi nuqtalar soni."""
     check_key(request)
     with db() as con:
-        rows = con.execute("SELECT ts FROM points WHERE user_id=?", (web_user_id(),)).fetchall()
+        rows = con.execute("SELECT ts FROM points").fetchall()
     counts: dict[str, int] = {}
     for (ts,) in rows:
         d = datetime.fromtimestamp(ts, TZ).strftime("%Y-%m-%d")
@@ -227,15 +366,18 @@ async def api_points(request: web.Request) -> web.Response:
         day = datetime.strptime(request.query.get("date", ""), "%Y-%m-%d").date()
     except ValueError:
         day = datetime.now(TZ).date()
-    rows = get_points(web_user_id(), day)
     hm = lambda ts: datetime.fromtimestamp(ts, TZ).strftime("%H:%M")
-    return web.json_response({
-        "points": [{"t": hm(ts), "lat": lat, "lon": lon, "addr": addr} for ts, lat, lon, addr in rows],
-        "stops": [
-            {**st, "t0": hm(st["from"]), "t1": hm(st["to"]), "dur": fmt_dur(st["mins"]) if st["mins"] else ""}
-            for st in build_stops(rows)
-        ],
-    })
+    out = []
+    for t in all_trackers():
+        rows = get_points(t["id"], day)
+        if rows:
+            out.append({
+                "id": t["id"],
+                "points": [{"t": hm(ts), "lat": lat, "lon": lon, "addr": addr} for ts, lat, lon, addr in rows],
+                "stops": [{**st, "t0": hm(st["from"]), "t1": hm(st["to"]), "dur": fmt_dur(st["mins"]) if st["mins"] else ""}
+                          for st in build_stops(rows)],
+            })
+    return web.json_response({"trackers": out})
 
 
 async def index(request: web.Request) -> web.FileResponse:
@@ -250,6 +392,7 @@ async def start_web(app: Application):
     wa.router.add_get("/", index)
     wa.router.add_get("/api/points", api_points)
     wa.router.add_get("/api/days", api_days)
+    wa.router.add_get("/api/trackers", api_trackers)
     wa.router.add_static("/", WEB_DIR)
     runner = web.AppRunner(wa)
     await runner.setup()
@@ -265,19 +408,19 @@ async def stop_web(app: Application):
 
 # ---------- Handlerlar ----------
 def allowed(update: Update) -> bool:
-    return not ALLOWED_USER_ID or (update.effective_user and update.effective_user.id == ALLOWED_USER_ID)
+    return not ALLOWED_IDS or (update.effective_user and update.effective_user.id in ALLOWED_IDS)
 
 
-async def record(bot, user_id, chat_id, lat, lon, now, stale_min=0):
+async def record(bot, t, lat, lon, now, stale_min=0):
     """Nuqtani saqlaydi va botga xabar yozadi."""
-    prev = last_point(user_id)
-    if prev and (prev[1], prev[2]) == (lat, lon):
-        addr = prev[3]  # joy o'zgarmagan - qayta so'ramaymiz
+    prev = last_point(t["id"])
+    if prev and (prev["lat"], prev["lon"]) == (lat, lon):
+        addr = prev["addr"]  # joy o'zgarmagan - qayta so'ramaymiz
     else:
         addr = await asyncio.to_thread(reverse_geocode, lat, lon)
-    save_point(user_id, chat_id, now, lat, lon, addr)
+    save_point(t, now, lat, lon, addr)
     note = f"\n⚠️ signal {stale_min} daq oldin uzilgan, oxirgi ma'lum joy" if stale_min else ""
-    await bot.send_message(chat_id, f"📍 {datetime.fromtimestamp(now, TZ):%H:%M} — {addr}{note}")
+    await bot.send_message(t["chat_id"], f"📍 {emoji_of(t)} {t['name']} · {datetime.fromtimestamp(now, TZ):%H:%M} — {addr}{note}")
 
 
 async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -287,38 +430,131 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id, chat_id, now = update.effective_user.id, msg.chat_id, int(time.time())
     lat, lon = msg.location.latitude, msg.location.longitude
     live = msg.location.live_period  # None bo'lsa - oddiy (bir martalik) lokatsiya
-    set_live(user_id, chat_id, lat, lon, now, int(msg.date.timestamp()) + live if live else 0)
-    if now - last_ts(user_id) >= INTERVAL_MIN * 60 - 5:
-        await record(context.bot, user_id, chat_id, lat, lon, now)
+    t, is_new = tracker_by_msg(chat_id, msg.message_id), False
+    if not t and not live:  # bir martalik lokatsiya - foydalanuvchining oxirgi izlovchisiga
+        mine = user_trackers(user_id)
+        t = mine[-1] if mine else None
+    if not t:
+        t, is_new = new_tracker(user_id, chat_id, msg.message_id), True
+    if t["stopped"]:
+        return
+    set_live(t["id"], lat, lon, now, int(msg.date.timestamp()) + live if live else 0)
+    if is_new:
+        p = await context.bot.send_message(
+            chat_id,
+            f"✅ Yangi jonli joylashuv qo'shildi: {emoji_of(t)} {t['name']}\n\n"
+            "Nom berish uchun shu xabarga javob qilib nom yozing.\n"
+            "Rangni o'zgartirish: /color Nom = Rang",
+            reply_markup=ForceReply(selective=True, input_field_placeholder="Masalan: Telefonim"),
+        )
+        set_prompt(t["id"], p.message_id)
+    if now - last_ts(t["id"]) >= INTERVAL_MIN * 60 - 5:
+        await record(context.bot, t, lat, lon, now)
 
 
 async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     """Telegram joy o'zgarmasa yangilanish yubormaydi - shunda ham har INTERVAL_MIN da yozib boramiz."""
     now = int(time.time())
-    for user_id, chat_id, lat, lon, seen in active_live(now):
-        if now - last_ts(user_id) >= INTERVAL_MIN * 60 - 5:
-            stale = (now - seen) // 60
+    for row in active_live(now):
+        t = dict(row)
+        if now - last_ts(t["id"]) >= INTERVAL_MIN * 60 - 5:
+            stale = (now - t["seen"]) // 60
             try:
-                await record(context.bot, user_id, chat_id, lat, lon, now, stale if stale >= 15 else 0)
+                await record(context.bot, t, t["lat"], t["lon"], now, stale if stale >= 15 else 0)
             except Exception:
-                log.exception("heartbeat xato: %s", user_id)
+                log.exception("heartbeat xato: %s", t["id"])
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """«Nom bering» xabariga javob qilib yozilgan nomni qabul qiladi."""
+    msg = update.effective_message
+    if not allowed(update) or not msg.reply_to_message:
+        return
+    t = tracker_by_prompt(msg.chat_id, msg.reply_to_message.message_id)
+    if not t:
+        return
+    err = rename_tracker(t["id"], msg.text)
+    if err:
+        await msg.reply_text(err)
+        return
+    t = next(x for x in all_trackers() if x["id"] == t["id"])  # yangilangan nom bilan
+    await msg.reply_text(f"✅ Nom saqlandi: {emoji_of(t)} {t['name']}")
+
+
+def arg_pair(context) -> tuple[str, str]:
+    name, _, val = " ".join(context.args).partition("=")
+    return name.strip(), val.strip()
+
+
+async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    ts = user_trackers(update.effective_user.id)
+    if not ts:
+        await update.message.reply_text("Hali jonli joylashuv yo'q. Jonli lokatsiya ulashing.")
+        return
+    lines = []
+    for t in ts:
+        cname = next((p[0] for p in PALETTE if p[1] == t["color"].lower()), t["color"])
+        lp = last_point(t["id"])
+        last = f", oxirgi: {datetime.fromtimestamp(lp['ts'], TZ):%d.%m %H:%M}" if lp else ""
+        lines.append(f"{emoji_of(t)} {t['name']} — {cname}{' (to‘xtatilgan)' if t['stopped'] else ''}{last}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    old, new = arg_pair(context)
+    t = find_tracker(update.effective_user.id, old)
+    if not (old and new):
+        await update.message.reply_text("Format: /rename Eski nom = Yangi nom")
+    elif not t:
+        await update.message.reply_text(f"«{old}» topilmadi. /list")
+    else:
+        await update.message.reply_text(rename_tracker(t["id"], new) or f"✅ Nom o'zgardi: {new}")
+
+
+async def cmd_color(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    name, color = arg_pair(context)
+    t = find_tracker(update.effective_user.id, name)
+    if not (name and color):
+        await update.message.reply_text("Format: /color Nom = Rang\nRanglar: " + ", ".join(p[0] for p in PALETTE) + " yoki #RRGGBB")
+    elif not t:
+        await update.message.reply_text(f"«{name}» topilmadi. /list")
+    else:
+        await update.message.reply_text(set_color(t["id"], color) or "✅ Rang o'zgardi")
 
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if allowed(update):
-        stop_live(update.effective_user.id)
-        await update.message.reply_text("Kuzatuv to'xtatildi. Qayta boshlash uchun jonli lokatsiyani yangidan ulashing.")
+    if not allowed(update):
+        return
+    name = " ".join(context.args).strip()
+    ts = user_trackers(update.effective_user.id)
+    if name:
+        t = find_tracker(update.effective_user.id, name)
+        ts = [t] if t else []
+        if not t:
+            await update.message.reply_text(f"«{name}» topilmadi. /list")
+            return
+    for t in ts:
+        set_stopped(t["id"], True)
+    await update.message.reply_text("Kuzatuv to'xtatildi: " + (", ".join(t["name"] for t in ts) or "—") +
+                                    "\nQayta boshlash uchun jonli lokatsiyani yangidan ulashing (yangi joylashuv sifatida qo'shiladi).")
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
     await update.message.reply_text(
-        "Salom! Men qayerdaligingizni kuzataman.\n\n"
-        "1) 📎 → Lokatsiya → «Jonli lokatsiyani ulashish» (8 soat/doimiy) ni tanlang.\n"
-        f"2) Men har {INTERVAL_MIN} daqiqada manzilingizni yozib boraman.\n"
-        f"3) Kun oxirida ({SUMMARY_TIME}) xaritada yo'lingizni yuboraman.\n\n"
-        "/stop — kuzatuvni to'xtatish\n/app — xarita ilovasi (PWA) havolasi\n/today — bugungi xarita\n/yesterday — kechagi xarita"
+        "Salom! Men jonli lokatsiyalarni kuzataman.\n\n"
+        "1) 📎 → Lokatsiya → «Jonli lokatsiyani ulashish». Har bir jonli lokatsiya alohida joylashuv bo'ladi.\n"
+        "2) Bot nom so'raydi — javob qilib nom yozing. Har biriga alohida rang beriladi.\n"
+        f"3) Har {INTERVAL_MIN} daqiqada manzillarni yozaman, kun oxirida ({SUMMARY_TIME}) hisobot yuboraman.\n\n"
+        "/list — joylashuvlar\n/rename Eski = Yangi — nomni o'zgartirish\n/color Nom = Rang — rangni o'zgartirish\n"
+        "/stop [Nom] — kuzatuvni to'xtatish\n/app — xarita ilovasi (PWA)\n/today, /yesterday — hisobot"
     )
 
 
@@ -355,13 +591,13 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    migrate_orphans()
     app = Application.builder().token(BOT_TOKEN).post_init(start_web).post_shutdown(stop_web).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("stop", cmd_stop))
-    app.add_handler(CommandHandler("app", cmd_app))
-    app.add_handler(CommandHandler("today", cmd_today))
-    app.add_handler(CommandHandler("yesterday", cmd_yesterday))
+    for name, fn in [("start", cmd_start), ("list", cmd_list), ("rename", cmd_rename), ("color", cmd_color),
+                     ("stop", cmd_stop), ("app", cmd_app), ("today", cmd_today), ("yesterday", cmd_yesterday)]:
+        app.add_handler(CommandHandler(name, fn))
     app.add_handler(MessageHandler(filters.LOCATION, on_location))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.job_queue.run_repeating(heartbeat, interval=60, first=30)
     h, m = map(int, SUMMARY_TIME.split(":"))
     app.job_queue.run_daily(daily_job, time=dtime(h, m, tzinfo=TZ))

@@ -42,9 +42,9 @@ async function api(path) {
 }
 
 async function fetchDay(date) {
-  const { points, stops } = await api(`/api/points?date=${date}`);
+  const { trackers } = await api(`/api/points?date=${date}`);
   // o'tgan kun tugallangan: qayta yuklash shart emas. Bugun doim yangilanadi.
-  const rec = { date, points, stops, final: date < iso(new Date()), saved: Date.now() };
+  const rec = { date, trackers, final: date < iso(new Date()), saved: Date.now() };
   await putDay(rec);
   return rec;
 }
@@ -55,38 +55,74 @@ L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, att
 const layer = L.layerGroup().addTo(map);
 let date = dm ? dm[1] : iso(new Date());
 
-function render({ points, stops }, fit) {
+// Nom va rang har safar serverdan yangilanadi (o'zgartirilsa eski kunlarda ham yangisi ko'rinadi)
+let meta = JSON.parse(localStorage.locMeta || "{}");
+const hidden = new Set();
+let current = null;
+const info = id => meta[id] || { name: `Joylashuv ${id}`, color: "#2563eb" };
+
+async function refreshMeta() {
+  try {
+    meta = Object.fromEntries((await api("/api/trackers")).map(t => [t.id, t]));
+    localStorage.locMeta = JSON.stringify(meta);
+  } catch (e) { /* oflayn: saqlangan nomlar */ }
+}
+
+function render(rec, fit) {
+  current = rec;
   layer.clearLayers();
   const list = $("#list"); list.innerHTML = "";
-  $("#info").textContent = stops.length ? `${stops.length} ta joy` : "Ma'lumot yo'q";
-  if (!stops.length) return;
+  const legend = $("#legend"); legend.innerHTML = "";
+  const groups = rec.trackers;
+  const nStops = groups.reduce((n, g) => n + g.stops.length, 0);
+  $("#info").textContent = groups.length ? `${groups.length} joylashuv · ${nStops} joy` : "Ma'lumot yo'q";
+  const all = [];
 
-  const path = points.map(p => [p.lat, p.lon]);
-  L.polyline(path, { color: "#1e66f5", weight: 4, opacity: .8 }).addTo(layer);
-  points.forEach(p => L.circleMarker([p.lat, p.lon], { radius: 3, color: "#1e66f5", weight: 1, fillColor: "#fff", fillOpacity: 1 })
-    .bindTooltip(p.t).addTo(layer));
+  groups.forEach(g => {
+    const m = info(g.id), off = hidden.has(g.id);
+    const chip = document.createElement("button");
+    chip.className = "chip" + (off ? " off" : "");
+    chip.style.setProperty("--c", m.color);
+    chip.textContent = m.name;
+    chip.onclick = () => { off ? hidden.delete(g.id) : hidden.add(g.id); render(rec, true); };
+    legend.append(chip);
+    if (off) return;
 
-  const markers = stops.map((st, i) => {
-    const color = i === 0 ? "#16a34a" : i === stops.length - 1 ? "#dc2626" : "#1e66f5";
-    const icon = L.divIcon({ className: "", html: `<div class="pin" style="background:${color}">${i + 1}</div>`, iconSize: [28, 28], iconAnchor: [14, 14] });
-    const when = st.t0 === st.t1 ? st.t0 : `${st.t0}–${st.t1}`;
-    const box = document.createElement("div");
-    box.innerHTML = "<b></b><br><span></span>";
-    box.firstChild.textContent = st.dur ? `${when} · ${st.dur}` : when;
-    box.lastChild.textContent = st.addr;
-    return L.marker([st.lat, st.lon], { icon }).bindPopup(box).addTo(layer);
+    const path = g.points.map(p => [p.lat, p.lon]);
+    all.push(...path);
+    L.polyline(path, { color: m.color, weight: 4, opacity: .85 }).addTo(layer);
+    g.points.forEach(p => L.circleMarker([p.lat, p.lon], { radius: 3, color: m.color, weight: 1, fillColor: "#fff", fillOpacity: 1 })
+      .bindTooltip(`${m.name} · ${p.t}`).addTo(layer));
+
+    const h = document.createElement("li");
+    h.className = "grp"; h.style.setProperty("--c", m.color); h.textContent = m.name;
+    list.append(h);
+
+    const markers = g.stops.map((st, i) => {
+      const last = i === g.stops.length - 1;
+      const icon = L.divIcon({ className: "", html: `<div class="pin${last ? " last" : ""}" style="background:${m.color};--c:${m.color}">${i + 1}</div>`, iconSize: [28, 28], iconAnchor: [14, 14] });
+      const when = st.t0 === st.t1 ? st.t0 : `${st.t0}–${st.t1}`;
+      const box = document.createElement("div");
+      box.innerHTML = "<i></i><br><b></b><br><span></span>";
+      box.children[0].textContent = m.name;
+      box.children[0].style.color = m.color;
+      box.children[2].textContent = st.dur ? `${when} · ${st.dur}` : when;
+      box.children[4].textContent = st.addr;
+      return L.marker([st.lat, st.lon], { icon }).bindPopup(box).addTo(layer);
+    });
+
+    g.stops.forEach((st, i) => {
+      const li = document.createElement("li");
+      const b = document.createElement("b");
+      b.style.color = m.color;
+      b.textContent = `${i + 1}. ${st.t0 === st.t1 ? st.t0 : st.t0 + "–" + st.t1}`;
+      const d = document.createElement("span"); d.className = "dur"; d.textContent = st.dur ? ` (${st.dur})` : "";
+      li.append(b, d, document.createElement("br"), document.createTextNode(st.addr));
+      li.onclick = () => { map.flyTo([st.lat, st.lon], 18); markers[i].openPopup(); };
+      list.append(li);
+    });
   });
-
-  stops.forEach((st, i) => {
-    const li = document.createElement("li");
-    const b = document.createElement("b");
-    b.textContent = `${i + 1}. ${st.t0 === st.t1 ? st.t0 : st.t0 + "–" + st.t1}`;
-    const d = document.createElement("span"); d.className = "dur"; d.textContent = st.dur ? ` (${st.dur})` : "";
-    li.append(b, d, document.createElement("br"), document.createTextNode(st.addr));
-    li.onclick = () => { map.flyTo([st.lat, st.lon], 18); markers[i].openPopup(); };
-    list.append(li);
-  });
-  if (fit) map.fitBounds(L.latLngBounds(path), { padding: [30, 30], maxZoom: 17 });
+  if (fit && all.length) map.fitBounds(L.latLngBounds(all), { padding: [30, 30], maxZoom: 17 });
 }
 
 // ---------- Kunni ochish: avval telefondagi nusxa, keyin serverdan yangilash ----------
@@ -101,14 +137,15 @@ const rel = d => {
 async function load(fit = true) {
   const d = date;
   $("#title").textContent = `${rel(d)} · ${d}`;
-  const cached = await getDay(d);
+  let cached = await getDay(d);
+  if (cached && !cached.trackers) cached = null; // eski format - qayta yuklanadi
   if (cached) render(cached, fit);
   if (!cached?.final) {
     try {
       const rec = await fetchDay(d);
       if (d === date) render(rec, fit && !cached);
     } catch (e) {
-      if (!cached) { layer.clearLayers(); $("#list").innerHTML = ""; $("#info").textContent = "Oflayn: bu kun saqlanmagan"; }
+      if (!cached) { layer.clearLayers(); $("#list").innerHTML = ""; $("#legend").innerHTML = ""; $("#info").textContent = "Oflayn: bu kun saqlanmagan"; }
     }
   }
 }
@@ -124,7 +161,7 @@ async function showPanel() {
   const cached = new Map((await allDays()).map(r => [r.date, r]));
   const server = JSON.parse(localStorage.locDays || "[]");
   const days = new Map(server.map(x => [x.date, x.n]));
-  cached.forEach((r, d) => days.set(d, days.get(d) ?? r.points.length));
+  cached.forEach((r, d) => days.set(d, days.get(d) ?? (r.trackers || []).reduce((n, g) => n + g.points.length, 0)));
   days.set(iso(new Date()), days.get(iso(new Date())) ?? 0);
   const box = $("#panel .days"); box.innerHTML = "";
   let month = "";
@@ -152,17 +189,18 @@ $("#close").onclick = () => $("#panel").hidden = true;
 // ---------- Fon sinxronlash: barcha o'tgan kunlarni telefonga yuklab qo'yish ----------
 async function sync() {
   try {
+    await refreshMeta();
     const days = await api("/api/days");
     localStorage.locDays = JSON.stringify(days);
     const today = iso(new Date());
     for (const { date: d } of days) {
       if (d >= today) continue;
       const have = await getDay(d);
-      if (!have?.final) await fetchDay(d);
+      if (!(have?.trackers && have.final)) await fetchDay(d);
     }
   } catch (e) { /* oflayn: mavjud nusxalar bilan ishlayveramiz */ }
 }
 
 setInterval(() => { if (!document.hidden && date === iso(new Date())) load(false); }, 60000);
-load().then(sync);
+refreshMeta().then(() => load()).then(sync);
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
